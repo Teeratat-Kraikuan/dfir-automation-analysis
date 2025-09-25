@@ -1,0 +1,49 @@
+networks:
+  dfir-networks:
+    name: dfir-automation-analysis
+    driver: bridge
+
+volumes:
+  postgres:
+    driver: local
+    name: postgres
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/db
+  django:
+    driver: local
+    name: django
+    driver_opts:
+      type: none
+      o: bind
+      device: ./django
+services:
+  postgres:
+    container_name: postgres
+    image: postgres:16.2-bookworm
+    ports:
+      - "5432:5432"
+    env_file:
+      - .env
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    networks:
+      - dfir-networks
+    restart: unless-stopped
+  django:
+    container_name: django
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    volumes:
+      - django:/home/django/
+    networks:
+      - dfir-networks
+    depends_on:
+      - postgres
+    restart: unless-stopped

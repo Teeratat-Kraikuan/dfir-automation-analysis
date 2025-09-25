@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+
+{% load static %}
+
+{% block title %}Dashboard - DFIR Analysis{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h2><i class="fas fa-tachometer-alt"></i> DFIR Analysis Dashboard</h2>
+        <p class="text-muted">Monitor cases, evidence, and analysis progress</p>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card bg-primary text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 id="totalCases">-</h4>
+                        <p class="mb-0">Total Cases</p>
+                    </div>
+                    <i class="fas fa-folder fa-2x opacity-75"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card bg-success text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 id="totalEvidence">-</h4>
+                        <p class="mb-0">Evidence Items</p>
+                    </div>
+                    <i class="fas fa-archive fa-2x opacity-75"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card bg-warning text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 id="activeCases">-</h4>
+                        <p class="mb-0">Active Cases</p>
+                    </div>
+                    <i class="fas fa-clock fa-2x opacity-75"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card bg-info text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 id="completedCases">-</h4>
+                        <p class="mb-0">Completed</p>
+                    </div>
+                    <i class="fas fa-check-circle fa-2x opacity-75"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-list"></i> Recent Cases</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Case Number</th>
+                                <th>Title</th>
+                                <th>Evidence Count</th>
+                                <th>Investigator</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recentCasesTable">
+                            <tr>
+                                <td colspan="7" class="text-center">
+                                    <i class="fas fa-spinner fa-spin"></i> Loading...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-cogs"></i> Quick Actions</h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <a href="/upload" class="btn btn-primary">
+                        <i class="fas fa-upload"></i> Upload Evidence
+                    </a>
+                    <button class="btn btn-outline-secondary" onclick="refreshDashboard()">
+                        <i class="fas fa-sync-alt"></i> Refresh Data
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6><i class="fas fa-info-circle"></i> System Status</h6>
+            </div>
+            <div class="card-body">
+                <div id="systemStatus">
+                    <div class="d-flex align-items-center">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                        <span>Checking system status...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

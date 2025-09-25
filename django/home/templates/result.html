@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+
+{% load static %}
+
+{% block title %}Analysis Results - DFIR Analysis{% endblock %}
+
+{% block head %}
+<style>
+.tree-line {
+    line-height: 1.2;
+    padding: 1px 0;
+    font-size: 14px;
+}
+
+.tree-line:hover {
+    background-color: #f8f9fa;
+}
+
+#directoryTreeContainer {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 0.375rem;
+    padding: 15px;
+}
+
+.tree-line mark {
+    background-color: #ffeb3b;
+    padding: 0;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2><i class="fas fa-chart-bar"></i> Analysis Results</h2>
+                <p class="text-muted">Evidence ID: <span id="evidenceId">{{ evidence_id }}</span></p>
+            </div>
+            <div>
+                <a href="/upload" class="btn btn-outline-primary">
+                    <i class="fas fa-upload"></i> Upload New Evidence
+                </a>
+                <button class="btn btn-success" onclick="exportResults()">
+                    <i class="fas fa-download"></i> Export Results
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-md-3">
+                        <h4 id="totalRecords" class="text-primary">-</h4>
+                        <p class="mb-0">Total Records</p>
+                    </div>
+                    <div class="col-md-3">
+                        <h4 id="mftRecords" class="text-success">-</h4>
+                        <p class="mb-0">MFT Entries</p>
+                    </div>
+                    <div class="col-md-3">
+                        <h4 id="eventLogRecords" class="text-info">-</h4>
+                        <p class="mb-0">Event Log Entries</p>
+                    </div>
+                    <div class="col-md-3">
+                        <h4 id="amcacheRecords" class="text-warning">-</h4>
+                        <p class="mb-0">Amcache Entries</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <ul class="nav nav-tabs card-header-tabs" id="artifactTabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" id="mft-tab" data-bs-toggle="tab" data-bs-target="#mft" type="button" role="tab">
+                            <i class="fas fa-hdd"></i> MFT
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="security-tab" data-bs-toggle="tab" data-bs-target="#security" type="button" role="tab">
+                            <i class="fas fa-shield-alt"></i> Security Events
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="amcache-tab" data-bs-toggle="tab" data-bs-target="#amcache" type="button" role="tab">
+                            <i class="fas fa-memory"></i> Amcache
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="powershell-tab" data-bs-toggle="tab" data-bs-target="#powershell" type="button" role="tab">
+                            <i class="fas fa-terminal"></i> PowerShell
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="directory-tab" data-bs-toggle="tab" data-bs-target="#directory" type="button" role="tab">
+                            <i class="fas fa-folder-tree"></i> Directory Structure
+                        </button>
+                    </li>
+                </ul>
+            </div>
+            <div class="card-body">
+                <div class="tab-content" id="artifactTabContent">
+                    <!-- MFT Tab -->
+                    <div class="tab-pane fade show active" id="mft" role="tabpanel">
+                        <div class="row mb-3">
+                            <div class="col-md-4">
+                                <input type="text" class="form-control" id="mftSearch" placeholder="Search MFT entries...">
+                            </div>
+                            <div class="col-md-2">
+                                <select class="form-select" id="mftTypeFilter">
+                                    <option value="">All Types</option>
+                                    <option value="File">Files</option>
+                                    <option value="Directory">Directories</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <select class="form-select" id="mftSizeFilter">
+                                    <option value="">All Sizes</option>
+                                    <option value="small">< 1MB</option>
+                                    <option value="medium">1MB - 100MB</option>
+                                    <option value="large">> 100MB</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <button class="btn btn-outline-secondary" onclick="clearFilters('mft')">
+                                    <i class="fas fa-times"></i> Clear
+                                </button>
+                            </div>
+                            <div class="col-md-2">
+                                <span class="badge bg-primary" id="mftCount">0 records</span>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover" id="mftTable">
+                                <thead class="table-dark">
+                                    <tr>
+                                        <th onclick="sortTable('mftTable', 0)">Entry # <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('mftTable', 1)">File Name <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('mftTable', 2)">Full Path <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('mftTable', 3)">Size <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('mftTable', 4)">Created <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('mftTable', 5)">Modified <i class="fas fa-sort"></i></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="mftTableBody">
+                                    <tr>
+                                        <td colspan="6" class="text-center">
+                                            <div class="spinner-border" role="status"></div>
+                                            <span class="ms-2">Loading MFT data...</span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <nav id="mftPagination"></nav>
+                    </div>
+
+                    <!-- Security Events Tab -->
+                    <div class="tab-pane fade" id="security" role="tabpanel">
+                        <div class="row mb-3">
+                            <div class="col-md-4">
+                                <input type="text" class="form-control" id="securitySearch" placeholder="Search security events...">
+                            </div>
+                            <div class="col-md-2">
+                                <select class="form-select" id="eventIdFilter">
+                                    <option value="">All Event IDs</option>
+                                    <option value="4624">4624 - Logon</option>
+                                    <option value="4625">4625 - Failed Logon</option>
+                                    <option value="4648">4648 - Explicit Logon</option>
+                                    <option value="4672">4672 - Admin Logon</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <select class="form-select" id="logonTypeFilter">
+                                    <option value="">All Logon Types</option>
+                                    <option value="2">2 - Interactive</option>
+                                    <option value="3">3 - Network</option>
+                                    <option value="10">10 - RemoteInteractive</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <button class="btn btn-outline-secondary" onclick="clearFilters('security')">
+                                    <i class="fas fa-times"></i> Clear
+                                </button>
+                            </div>
+                            <div class="col-md-2">
+                                <span class="badge bg-info" id="securityCount">0 records</span>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover" id="securityTable">
+                                <thead class="table-dark">
+                                    <tr>
+                                        <th onclick="sortTable('securityTable', 0)">Timestamp <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('securityTable', 1)">Event ID <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('securityTable', 2)">Description <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('securityTable', 3)">User <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('securityTable', 4)">Source IP <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('securityTable', 5)">Computer <i class="fas fa-sort"></i></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="securityTableBody">
+                                    <tr>
+                                        <td colspan="6" class="text-center">
+                                            <div class="spinner-border" role="status"></div>
+                                            <span class="ms-2">Loading security events...</span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <nav id="securityPagination"></nav>
+                    </div>
+
+                    <!-- Amcache Tab -->
+                    <div class="tab-pane fade" id="amcache" role="tabpanel">
+                        <div class="row mb-3">
+                            <div class="col-md-4">
+                                <input type="text" class="form-control" id="amcacheSearch" placeholder="Search amcache entries...">
+                            </div>
+                            <div class="col-md-2">
+                                <select class="form-select" id="publisherFilter">
+                                    <option value="">All Publishers</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <button class="btn btn-outline-secondary" onclick="clearFilters('amcache')">
+                                    <i class="fas fa-times"></i> Clear
+                                </button>
+                            </div>
+                            <div class="col-md-2">
+                                <span class="badge bg-warning" id="amcacheCount">0 records</span>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover" id="amcacheTable">
+                                <thead class="table-dark">
+                                    <tr>
+                                        <th onclick="sortTable('amcacheTable', 0)">Application Name <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('amcacheTable', 1)">Version <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('amcacheTable', 2)">Publisher <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('amcacheTable', 3)">Install Date <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('amcacheTable', 4)">File Path <i class="fas fa-sort"></i></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="amcacheTableBody">
+                                    <tr>
+                                        <td colspan="5" class="text-center">
+                                            <div class="spinner-border" role="status"></div>
+                                            <span class="ms-2">Loading amcache data...</span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <nav id="amcachePagination"></nav>
+                    </div>
+
+                    <!-- PowerShell Tab -->
+                    <div class="tab-pane fade" id="powershell" role="tabpanel">
+                        <div class="row mb-3">
+                            <div class="col-md-4">
+                                <input type="text" class="form-control" id="powershellSearch" placeholder="Search PowerShell commands...">
+                            </div>
+                            <div class="col-md-2">
+                                <select class="form-select" id="severityFilter">
+                                    <option value="">All Severity</option>
+                                    <option value="Information">Information</option>
+                                    <option value="Warning">Warning</option>
+                                    <option value="Error">Error</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <button class="btn btn-outline-secondary" onclick="clearFilters('powershell')">
+                                    <i class="fas fa-times"></i> Clear
+                                </button>
+                            </div>
+                            <div class="col-md-2">
+                                <span class="badge bg-secondary" id="powershellCount">0 records</span>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover" id="powershellTable">
+                                <thead class="table-dark">
+                                    <tr>
+                                        <th onclick="sortTable('powershellTable', 0)">Timestamp <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('powershellTable', 1)">Event ID <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('powershellTable', 2)">Command <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('powershellTable', 3)">User <i class="fas fa-sort"></i></th>
+                                        <th onclick="sortTable('powershellTable', 4)">Process ID <i class="fas fa-sort"></i></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="powershellTableBody">
+                                    <tr>
+                                        <td colspan="5" class="text-center">
+                                            <div class="spinner-border" role="status"></div>
+                                            <span class="ms-2">Loading PowerShell data...</span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <nav id="powershellPagination"></nav>
+                    </div>
+
+                    <!-- Directory Structure Tab -->
+                    <div class="tab-pane fade" id="directory" role="tabpanel">
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <input type="text" class="form-control" id="directorySearch" placeholder="Search directory tree...">
+                            </div>
+                            <div class="col-md-2">
+                                <button class="btn btn-outline-secondary" onclick="expandAllDirectories()">
+                                    <i class="fas fa-expand-arrows-alt"></i> Expand All
+                                </button>
+                            </div>
+                            <div class="col-md-2">
+                                <button class="btn btn-outline-secondary" onclick="collapseAllDirectories()">
+                                    <i class="fas fa-compress-arrows-alt"></i> Collapse All
+                                </button>
+                            </div>
+                            <div class="col-md-2">
+                                <span class="badge bg-success" id="directoryStats">0 files, 0 dirs</span>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-body">
+                                <div id="directoryTreeContainer" style="font-family: 'Courier New', monospace; white-space: pre-wrap; max-height: 600px; overflow-y: auto;">
+                                    <div class="text-center">
+                                        <div class="spinner-border" role="status"></div>
+                                        <span class="ms-2">Loading directory structure...</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

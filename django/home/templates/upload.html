@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% load static %}
+
+{% block title %}Upload Evidence - DFIR Analysis{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8 mx-auto">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-upload"></i> Upload KAPE Evidence</h4>
+            </div>
+            <div class="card-body">
+                <form id="uploadForm" enctype="multipart/form-data">
+                    <div class="upload-area" id="uploadArea">
+                        <i class="fas fa-cloud-upload-alt fa-3x text-muted mb-3"></i>
+                        <h5>Drag & Drop ZIP File Here</h5>
+                        <p class="text-muted">or click to browse files</p>
+                        <input type="file" id="evidenceFile" name="evidence_file" accept=".zip" style="display: none;">
+                        <button type="button" class="btn btn-outline-primary" onclick="document.getElementById('evidenceFile').click()">
+                            <i class="fas fa-folder-open"></i> Browse Files
+                        </button>
+                    </div>
+
+                    <div class="mt-3">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <label for="uploadedBy" class="form-label">Uploaded By</label>
+                                <input type="text" class="form-control" id="uploadedBy" name="uploaded_by" value="Demo User">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="sourceSystem" class="form-label">Source System</label>
+                                <input type="text" class="form-control" id="sourceSystem" name="source_system" placeholder="e.g., WORKSTATION-01">
+                            </div>
+                        </div>
+                        <div class="row mt-3">
+                            <div class="col-md-6">
+                                <label for="acquisitionTool" class="form-label">Acquisition Tool</label>
+                                <input type="text" class="form-control" id="acquisitionTool" name="acquisition_tool" value="KAPE">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="notes" class="form-label">Notes</label>
+                                <input type="text" class="form-control" id="notes" name="notes" placeholder="Optional notes">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="progress-container mt-3">
+                        <label class="form-label">Upload Progress</label>
+                        <div class="progress">
+                            <div class="progress-bar" role="progressbar" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <div class="mt-3">
+                        <button type="submit" class="btn btn-primary" id="uploadBtn" disabled>
+                            <i class="fas fa-upload"></i> Upload Evidence
+                        </button>
+                        <button type="button" class="btn btn-success" id="analyzeBtn" style="display: none;">
+                            <i class="fas fa-cogs"></i> Start Analysis
+                        </button>
+                    </div>
+                </form>
+
+                <div class="analysis-status" id="analysisStatus" style="display: none;">
+                    <div class="card">
+                        <div class="card-header">
+                            <h6><i class="fas fa-cogs"></i> Analysis Status</h6>
+                        </div>
+                        <div class="card-body">
+                            <div class="d-flex align-items-center">
+                                <div class="spinner-border spinner-border-sm me-2" id="analysisSpinner" role="status"></div>
+                                <span id="statusText">Starting analysis...</span>
+                            </div>
+                            <div class="progress mt-2">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" id="analysisProgress" style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="alert alert-info mt-3">
+                    <i class="fas fa-info-circle"></i>
+                    <strong>Supported Files:</strong> ZIP files containing KAPE evidence bundles with MFT, Amcache, and event logs.
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
