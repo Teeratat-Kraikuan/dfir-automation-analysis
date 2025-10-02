@@ -1,23 +1,28 @@
 networks:
   dfir-networks:
-    name: dfir-automation-analysis
     driver: bridge
 
 volumes:
   postgres:
     driver: local
-    name: postgres
     driver_opts:
       type: none
       o: bind
       device: ./data/db
   django:
     driver: local
-    name: django
     driver_opts:
       type: none
       o: bind
       device: ./django
+  media:
+    name: media                  # ใช้ชื่อ volume ชัด ๆ (ให้ django และ docker run ใช้ร่วมกันได้)
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/media
+
 services:
   postgres:
     container_name: postgres
@@ -31,19 +36,53 @@ services:
     networks:
       - dfir-networks
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # build image ez-parsers:latest และรันค้างแบบไม่ทำอะไร (เพื่อให้ image พร้อมใช้)
+  parsers:
+    container_name: ez-parsers
+    build:
+      context: ./parsers          # มี Dockerfile.parsers, parse.sh, tools/ อยู่ในโฟลเดอร์นี้
+      dockerfile: Dockerfile
+    image: ez-parsers:latest
+    platform: linux/amd64         # แนะนำบน Mac/Apple Silicon
+    entrypoint: ["/bin/sh","-c","tail -f /dev/null"]  # แทน ENTRYPOINT เดิม (parse) เพื่อไม่ให้รีสตาร์ต
+    restart: unless-stopped
+    networks:
+      - dfir-networks
+
   django:
     container_name: django
     build:
       context: .
       dockerfile: Dockerfile
+    working_dir: /home/django
+    command: python manage.py runserver 0.0.0.0:8000
     ports:
       - "8001:8000"
     env_file:
       - .env
+    environment:
+      - PYTHONPATH=/home/django
+      # ส่งค่าให้ view ใช้ docker run แบบ volume ชื่อ media และกำหนด platform
+      - PARSER_IMAGE=ez-parsers:latest
+      - DOCKER_VOLUME_MEDIA=media
+      - DOCKER_VOLUME_MOUNTPOINT=/mnt/media
+      - PARSER_PLATFORM=linux/amd64
     volumes:
       - django:/home/django/
+      - media:/home/django/media
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - dfir-networks
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      parsers:
+        condition: service_started
     restart: unless-stopped

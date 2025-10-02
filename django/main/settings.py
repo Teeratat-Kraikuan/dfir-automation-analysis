@@ -129,9 +129,29 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = "/static/"
+STATICFILES_DIRS = [BASE_DIR / "static"]        # = ./django/static
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Static files
+STATIC_URL = "/static/"
+STATICFILES_DIRS = [BASE_DIR / "static"]         # => ./django/static
+STATIC_ROOT = BASE_DIR / "staticfiles"           # => ./django/staticfiles (output จาก collectstatic)
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# ===== Media (หลักฐาน) =====
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"   # => ./django/media
+
+# เขียนอัปโหลดใหญ่ลงไฟล์ชั่วคราว ไม่ยัด RAM
+FILE_UPLOAD_HANDLERS = [
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+]
+
+# เพดานขนาด body และ memory buffer
+DATA_UPLOAD_MAX_MEMORY_SIZE = 1024 * 1024 * 1024 * 5   # 5 GB (ปรับตามจริง)
+FILE_UPLOAD_MAX_MEMORY_SIZE = 1024 * 1024              # 1 MB (บังคับลงดิสก์เร็ว)

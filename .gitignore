@@ -91,3 +91,6 @@ django/media/*
 # django keep
 !django/media/default/
 !django/media/default/*
+
+staticfiles/
+migrations/
