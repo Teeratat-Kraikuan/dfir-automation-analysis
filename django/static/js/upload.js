@@ -180,8 +180,11 @@
           });
           const d2 = await r2.json();
 
-          if (!r2.ok || d2.status !== 'parsed') {
-            alert('Parse failed: ' + (d2.log_tail || r2.statusText));
+          const statusStr = String((d2 && d2.status) || '').toUpperCase();
+          const ok = r2.ok && (d2.ok === true || statusStr === 'PARSED' || statusStr === 'DONE');
+
+          if (!ok) {
+            alert('Parse failed: ' + (d2.log_tail || d2.error || r2.statusText));
             if (statusText) statusText.textContent = 'Parse failed.';
             if (analysisProgress) analysisProgress.style.width = '100%';
             analyzeBtn.disabled = false;

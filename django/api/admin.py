@@ -1,8 +1,16 @@
 from django.contrib import admin
-from .models import Evidence
+from .models import Case, Evidence, MFTEntry, AmcacheEntry
+
+@admin.register(Case)
+class CaseAdmin(admin.ModelAdmin):
+    list_display = ("case_number", "title", "status", "priority", "created_at")
+    search_fields = ("case_number", "title", "tags")
 
 @admin.register(Evidence)
 class EvidenceAdmin(admin.ModelAdmin):
-    list_display = ("id", "original_name", "uploaded_by", "source_system", "status", "uploaded_at")
-    list_filter = ("status", "acquisition_tool", "uploaded_at")
-    search_fields = ("original_name", "uploaded_by", "source_system", "sha256")
+    list_display = ("id", "case", "original_filename", "parse_status", "created_at")
+    search_fields = ("original_filename", "sha256", "source_system", "notes")
+    list_filter = ("parse_status",)
+
+admin.site.register(MFTEntry)
+admin.site.register(AmcacheEntry)
