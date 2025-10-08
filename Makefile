@@ -123,3 +123,20 @@ makemigrations:
 .PHONY: collectstatic
 collectstatic:
 	$(COMPOSE) exec django python manage.py collectstatic --noinput
+
+# ---- Cache Cleanup ----
+.PHONY: clean-pyc clear-cache clear-all-caches
+
+# ลบไฟล์แคชของ Python (.pyc/.pyo) และโฟลเดอร์ __pycache__, .pytest_cache, .mypy_cache
+clean-pyc:
+	find . -name '__pycache__' -type d -prune -exec rm -rf {} + ; \
+	find . -name '*.py[co]' -type f -delete ; \
+	find . -name '.pytest_cache' -type d -prune -exec rm -rf {} + ; \
+	find . -name '.mypy_cache' -type d -prune -exec rm -rf {} +
+
+# สั่งล้าง Django cache ภายในคอนเทนเนอร์ (ต้องมี service ชื่อ django กำลังรัน)
+clear-cache:
+	$(COMPOSE) exec django python manage.py shell -c "from django.core.cache import cache; cache.clear(); print('Django cache cleared')"
+
+# สะดวกกดทีเดียวล้างหมด
+clear-all-caches: clean-pyc clear-cache

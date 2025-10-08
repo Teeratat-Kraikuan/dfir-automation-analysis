@@ -9,14 +9,11 @@
     <style>
         .navbar-brand { font-weight: bold; }
         .upload-area {
-            border: 2px dashed #ccc;
-            border-radius: 10px;
-            padding: 40px;
-            text-align: center;
-            transition: border-color 0.3s;
+        border: 2px dashed #ccc; border-radius: 10px; padding: 40px; text-align: center; transition: border-color .3s;
         }
         .upload-area:hover { border-color: #007bff; }
-        .upload-area.dragover { border-color: #007bff; background-color: #f8f9fa; }
+        /* ให้ตรงกับ JS ที่ใส่ class 'drag-over' */
+        .upload-area.drag-over { border-color: #007bff; background-color: #f8f9fa; }
         .progress-container { display: none; }
         .analysis-status { margin-top: 20px; }
     </style>
@@ -24,14 +21,15 @@
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
         <div class="container">
-            <a class="navbar-brand" href="/">
-                <i class="fas fa-search"></i> DFIR Analysis Platform
-            </a>
-            <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="/"><i class="fas fa-home"></i> Dashboard</a>
-                <a class="nav-link" href="/upload"><i class="fas fa-upload"></i> Upload Evidence</a>
-                <a class="nav-link" href="/results"><i class="fas fa-chart-bar"></i> Results</a>
-            </div>
+        <a class="navbar-brand" href="/">
+            <i class="fas fa-search"></i> DFIR Analysis Platform
+        </a>
+        <div class="navbar-nav ms-auto">
+            <a class="nav-link" href="/"><i class="fas fa-home"></i> Dashboard</a>
+            <a class="nav-link" href="/upload"><i class="fas fa-upload"></i> Upload Evidence</a>
+            <!-- ใช้ url name แทนฮาร์ดโค้ด -->
+            <a class="nav-link" href="{% url 'results_index' %}"><i class="fas fa-chart-bar"></i> Results</a>
+        </div>
         </div>
     </nav>
 

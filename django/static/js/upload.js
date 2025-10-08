@@ -1,15 +1,12 @@
 // django/static/js/upload.js
 (function () {
-  // ---- CSRF helper (อ่านจาก cookie) ----
   function getCookie(name) {
     const v = ('; ' + document.cookie).split('; ' + name + '=');
     if (v.length === 2) return v.pop().split(';').shift();
   }
   const csrftoken = getCookie('csrftoken');
 
-  // รอ DOM พร้อม (เราก็ใส่ defer ไว้แล้ว เผื่อไว้เพิ่มความชัวร์)
   document.addEventListener('DOMContentLoaded', function () {
-    // Elements
     const area = document.getElementById('uploadArea');
     const fileInput = document.getElementById('evidenceFile');
     const uploadBtn = document.getElementById('uploadBtn');
@@ -30,7 +27,6 @@
     let selectedFile = null;
     let lastUploadResp = null;
 
-    // ---- Drag & Drop ----
     if (area) {
       const highlight = (on) => {
         if (on) area.classList.add('drag-over');
@@ -49,11 +45,9 @@
           if (uploadBtn) uploadBtn.disabled = false;
         }
       });
-      // click ทั้งบล็อกเพื่อเปิดไฟล์
       area.addEventListener('click', () => fileInput && fileInput.click());
     }
 
-    // ---- Browse ----
     if (fileInput) {
       fileInput.addEventListener('change', (e) => {
         if (e.target.files.length) {
@@ -63,7 +57,6 @@
       });
     }
 
-    // ---- Submit Upload ----
     if (form) {
       form.addEventListener('submit', function (e) {
         e.preventDefault();
@@ -125,7 +118,6 @@
       });
     }
 
-    // ---- Start Analysis = Extract -> Parse ----
     if (analyzeBtn) {
       analyzeBtn.addEventListener('click', async function () {
         if (!lastUploadResp) {
@@ -134,7 +126,6 @@
         }
         const id = lastUploadResp.id;
 
-        // เตรียม UI
         analyzeBtn.disabled = true;
         if (analysisStatus) analysisStatus.style.display = 'block';
         if (csvLinks) csvLinks.style.display = 'none';
@@ -143,7 +134,6 @@
         if (statusText) statusText.textContent = 'Extracting KAPE bundle...';
         if (analysisProgress) analysisProgress.style.width = '15%';
 
-        // 1) start-extract
         const fd1 = new FormData();
         fd1.append('id', id);
         try {
@@ -166,7 +156,6 @@
           return;
         }
 
-        // 2) start-parse
         if (statusText) statusText.textContent = 'Parsing to CSV (MFT, Amcache)...';
         if (analysisProgress) analysisProgress.style.width = '60%';
 
@@ -191,19 +180,17 @@
             return;
           }
 
-          // สำเร็จ
+          // ✅ สำเร็จ: พาไปหน้า result/<uuid>/
+          window.location.href = `/result/${id}/`;
+
+          // (ถ้าจะยังคงโชว์ลิงก์ดาวน์โหลด ก็ปล่อยส่วนล่างนี้ไว้ได้)
+          /*
           if (statusText) statusText.textContent = 'Done.';
           if (analysisProgress) analysisProgress.style.width = '100%';
           if (csvLinks) csvLinks.style.display = 'block';
-
-          if (d2.mft_csv) {
-            if (mftLink) mftLink.href = d2.mft_csv;
-            if (mftLinkRow) mftLinkRow.style.display = 'list-item';
-          }
-          if (d2.amcache_csv) {
-            if (amcacheLink) amcacheLink.href = d2.amcache_csv;
-            if (amcacheLinkRow) amcacheLinkRow.style.display = 'list-item';
-          }
+          if (d2.mft_csv) { if (mftLink) mftLink.href = d2.mft_csv; if (mftLinkRow) mftLinkRow.style.display = 'list-item'; }
+          if (d2.amcache_csv) { if (amcacheLink) amcacheLink.href = d2.amcache_csv; if (amcacheLinkRow) amcacheLinkRow.style.display = 'list-item'; }
+          */
         } catch (e) {
           alert('Network error during parse: ' + e);
           if (statusText) statusText.textContent = 'Parse failed.';

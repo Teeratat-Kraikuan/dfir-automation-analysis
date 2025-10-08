@@ -4,14 +4,21 @@ import hashlib
 import zipfile
 import subprocess
 import shutil
+import csv
 from pathlib import Path
 from typing import Tuple, Optional, Set
+from datetime import datetime
 
+from django.views.decorators.http import require_GET
+import shutil as _shutil
 from django.conf import settings
 from django.db import transaction
 from django.http import JsonResponse, HttpResponseBadRequest, Http404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+from django.db.models import Q
 
 from .models import Case, Evidence, MFTEntry, AmcacheEntry
 
@@ -233,12 +240,7 @@ def start_parse_api(request):
     หลังแตก ZIP:
       - หา $MFT และ Amcache.hve
       - docker run PARSER_IMAGE เพื่อแปลง CSV → MEDIA_ROOT/parsed/<id>/
-      - ใช้ named volume 'media' และเมาท์ใน parser ที่ DOCKER_VOLUME_MOUNTPOINT
-    ENV รองรับ:
-      - DOCKER_VOLUME_MEDIA (default: "media")
-      - DOCKER_VOLUME_MOUNTPOINT (default: "/mnt/media")
-      - PARSER_IMAGE (default: "ez-parsers:latest")
-      - PARSER_PLATFORM (optional, e.g., "linux/amd64")
+      - จากนั้น ingest CSV → DB (MFTEntry/AmcacheEntry) แบบลบของเก่าทีละชนิด เพื่อลด peak memory
     """
     ev_id = request.POST.get("id")
     if not ev_id:
@@ -249,39 +251,35 @@ def start_parse_api(request):
     except Evidence.DoesNotExist:
         raise Http404("evidence not found")
 
-    # หาโฟลเดอร์ extracted
-    if getattr(ev, "extracted_dir", None):
-        extracted = Path(ev.extracted_dir)
-    else:
-        # เผื่อโมเดลไม่มีฟิลด์ extracted_dir ให้เดาจาก MEDIA_ROOT
-        extracted = Path(settings.MEDIA_ROOT) / "extracted" / str(ev.id)
+    # หา extracted dir
+    extracted = Path(ev.extracted_dir) if getattr(ev, "extracted_dir", None) \
+        else Path(settings.MEDIA_ROOT) / "extracted" / str(ev.id)
     if not extracted.exists():
         return HttpResponseBadRequest("extracted path not found")
 
-    # เตรียม parsed dir
     parsed_dir = Path(settings.MEDIA_ROOT) / "parsed" / str(ev.id)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
-    # หาไฟล์เป้าหมาย
     mft_path, amc_path = _find_kape_artifacts(extracted)
 
     ev.parse_status = getattr(Evidence.ParseStatus, "RUNNING", "RUNNING")
     ev.parse_message = "parsing"
-    ev.save()
+    ev.save(update_fields=["parse_status", "parse_message"])
 
     log_lines: list[str] = []
+    log_lines.append("[django] start_parse_api: begin")
 
-    # docker CLI ต้องมีในคอนเทนเนอร์ django (เรามี /var/run/docker.sock ส่องออกไป host)
+    # ต้องมี docker CLI
     if shutil.which("docker") is None:
         msg = "docker CLI not found in django container"
         ev.parse_status = getattr(Evidence.ParseStatus, "FAILED", "FAILED")
         ev.parse_message = msg
         if hasattr(ev, "parse_log"):
             ev.parse_log = (ev.parse_log or "") + "\n" + msg
-        ev.save()
+        ev.save(update_fields=["parse_status", "parse_message", "parse_log"])
         return JsonResponse({"ok": False, "error": msg}, status=500)
 
-    # มี image หรือยัง
+    # ตรวจ image
     rc_img, out_img = _docker_run(["docker", "image", "inspect", PARSER_IMAGE])
     if rc_img != 0:
         log_lines.append(out_img)
@@ -289,7 +287,7 @@ def start_parse_api(request):
         ev.parse_message = f"parser image '{PARSER_IMAGE}' not found"
         if hasattr(ev, "parse_log"):
             ev.parse_log = (ev.parse_log or "") + "\n".join(log_lines)
-        ev.save()
+        ev.save(update_fields=["parse_status", "parse_message", "parse_log"])
         return JsonResponse({
             "ok": False,
             "error": ev.parse_message,
@@ -297,7 +295,6 @@ def start_parse_api(request):
         }, status=500)
 
     def run_parser(kind: str, in_abs: Path, out_csv_name: str) -> tuple[bool, str]:
-        # path ที่ parser container จะเห็น (ผ่าน named volume 'media' → mountpoint)
         rel_in = in_abs.relative_to(extracted).as_posix()
         in_path = f"{DOCKER_VOLUME_MOUNTPOINT}/extracted/{ev.id}/{rel_in}"
         out_dir = f"{DOCKER_VOLUME_MOUNTPOINT}/parsed/{ev.id}"
@@ -305,11 +302,7 @@ def start_parse_api(request):
         args = ["docker", "run", "--rm"]
         if PARSER_PLATFORM:
             args += ["--platform", PARSER_PLATFORM]
-        args += [
-            "-v", f"{DOCKER_VOLUME_MEDIA}:{DOCKER_VOLUME_MOUNTPOINT}",
-            PARSER_IMAGE,
-        ]
-
+        args += ["-v", f"{DOCKER_VOLUME_MEDIA}:{DOCKER_VOLUME_MOUNTPOINT}", PARSER_IMAGE]
         if kind == "mft":
             args += ["mft", in_path, out_dir, out_csv_name]
         elif kind == "amcache":
@@ -321,12 +314,12 @@ def start_parse_api(request):
         log_lines.append(f"$ {' '.join(args)}\n{out}\n(rc={rc})\n")
         return rc == 0, out
 
-    # ==== รันตามที่พบไฟล์ ====
+    # ==== รันตามที่พบไฟล์ ==== 
     mft_rel: Optional[str] = None
     amcache_focus_rel: Optional[str] = None
     amcache_all_rels: list[str] = []
 
-    # -- MFT --
+    # MFT
     if mft_path:
         ok, _ = run_parser("mft", mft_path, "mft.csv")
         mft_csv_abs = parsed_dir / "mft.csv"
@@ -335,7 +328,6 @@ def start_parse_api(request):
             mft_rel = f"parsed/{ev.id}/mft.csv"
             if hasattr(ev, "mft_csv_path"):
                 ev.mft_csv_path = mft_rel
-        # เก็บไฟล์ listing ไว้ใน summary
         if _exists_nonempty(mft_listing_abs):
             summ = dict(getattr(ev, "summary", {}) or {})
             summ["mft_filelisting"] = f"parsed/{ev.id}/mft_FileListing.csv"
@@ -343,28 +335,25 @@ def start_parse_api(request):
     else:
         log_lines.append("! $MFT not found under extracted path\n")
 
-    # -- Amcache: โฟกัสที่ amcache_UnassociatedFileEntries.csv --
+    # Amcache
     if amc_path:
-        ok, out_text = run_parser("amcache", amc_path, "amcache.csv")
+        ok, _out = run_parser("amcache", amc_path, "amcache.csv")
         focus_abs = parsed_dir / "amcache_UnassociatedFileEntries.csv"
         if _exists_nonempty(focus_abs):
             amcache_focus_rel = f"parsed/{ev.id}/amcache_UnassociatedFileEntries.csv"
             if hasattr(ev, "amcache_csv_path"):
                 ev.amcache_csv_path = amcache_focus_rel
         else:
-            # fallback: เก็บลิสต์ amcache_*.csv ทั้งหมด
             for p in sorted(parsed_dir.glob("amcache*.csv")):
                 if _exists_nonempty(p):
                     rel = f"parsed/{ev.id}/{p.name}"
                     amcache_all_rels.append(rel)
             if amcache_all_rels and not amcache_focus_rel:
-                # ถ้าไม่มีไฟล์ focus ก็ชี้ไฟล์แรกไว้เป็น representative
                 amcache_focus_rel = amcache_all_rels[0]
                 if hasattr(ev, "amcache_csv_path"):
                     ev.amcache_csv_path = amcache_focus_rel
             if not amcache_all_rels and not amcache_focus_rel:
                 log_lines.append("! Amcache parsed but no amcache*.csv found\n")
-        # เก็บลิสต์ไฟล์ amcache ทั้งหมดลง summary
         if amcache_all_rels:
             summ = dict(getattr(ev, "summary", {}) or {})
             summ["amcache_csvs"] = amcache_all_rels
@@ -372,14 +361,13 @@ def start_parse_api(request):
     else:
         log_lines.append("! Amcache.hve not found under extracted path\n")
 
-    # ==== อัปเดตสถานะ + นับจำนวนเรคคอร์ดแบบเร็ว (optional) ====
+    # ==== อัปเดตสถานะ + สรุปเร็ว ๆ ====
     produced_any = bool(mft_rel or amcache_focus_rel)
     if produced_any:
         ev.parse_status = getattr(Evidence.ParseStatus, "DONE", "DONE")
         ev.parse_message = "parsed"
         summary = dict(getattr(ev, "summary", {}) or {})
         try:
-            # นับแถวอย่างหยาบ (ระวังไฟล์ใหญ่มาก ๆ) — ถ้าไฟล์ > 200MB ให้ข้าม
             def _count_rows_if_small(path: Path) -> Optional[int]:
                 try:
                     if path.exists() and path.stat().st_size <= 200 * 1024 * 1024:
@@ -404,19 +392,43 @@ def start_parse_api(request):
         ev.parse_status = getattr(Evidence.ParseStatus, "FAILED", "FAILED")
         ev.parse_message = "no artifact parsed"
 
-    # เก็บ log
+    # ===== Ingest → DB (ทีละชนิด ลด peak memory) =====
+    try:
+        if mft_rel:
+            with transaction.atomic():
+                MFTEntry.objects.filter(evidence=ev).delete()
+                mft_csv_abs = Path(settings.MEDIA_ROOT) / mft_rel
+                inserted = ingest_mft_csv_to_db(ev, mft_csv_abs, chunk=1000)
+                summary = dict(getattr(ev, "summary", {}) or {})
+                summary["mft_rows_db"] = inserted
+                ev.summary = summary
+                ev.save(update_fields=["summary"])
+
+        if amcache_focus_rel:
+            with transaction.atomic():
+                AmcacheEntry.objects.filter(evidence=ev).delete()
+                amc_csv_abs = Path(settings.MEDIA_ROOT) / amcache_focus_rel
+                inserted = ingest_amcache_csv_to_db(ev, amc_csv_abs, chunk=1000)
+                summary = dict(getattr(ev, "summary", {}) or {})
+                summary["amcache_rows_db"] = inserted
+                ev.summary = summary
+                ev.save(update_fields=["summary"])
+    except Exception as _ing_e:
+        if hasattr(ev, "parse_log"):
+            ev.parse_log = (ev.parse_log or "") + f"\ningest error: {repr(_ing_e)}"
+            ev.save(update_fields=["parse_log"])
+
+    # เก็บ log และตอบกลับ
     if hasattr(ev, "parse_log"):
         ev.parse_log = (ev.parse_log or "") + "\n".join(log_lines)
     ev.save()
+
     return JsonResponse({
         "ok": ev.parse_status == getattr(Evidence.ParseStatus, "DONE", "DONE"),
-        "status": ev.parse_status,  # ให้ frontend อ่าน field เดิมได้
+        "status": ev.parse_status,
         "mft_csv": (settings.MEDIA_URL + mft_rel) if mft_rel else None,
-        # ชี้ไปที่ amcache_UnassociatedFileEntries.csv โดยตรงถ้ามี, ไม่งั้น representative
         "amcache_csv": (settings.MEDIA_URL + amcache_focus_rel) if amcache_focus_rel else None,
-        # รายการ amcache_*.csv ทั้งหมด (ถ้ามี)
         "amcache_all": [settings.MEDIA_URL + x for x in amcache_all_rels] if amcache_all_rels else [],
-        # ถ้ามี mft listing
         "mft_filelisting": (
             settings.MEDIA_URL + ev.summary.get("mft_filelisting")
             if getattr(ev, "summary", None) and ev.summary.get("mft_filelisting") else None
@@ -424,7 +436,6 @@ def start_parse_api(request):
         "log_tail": "\n".join(log_lines[-10:]),
         "summary": ev.summary,
     })
-
 
 def evidence_detail_api(request, ev_id):
     """
@@ -468,3 +479,380 @@ def evidence_detail_api(request, ev_id):
         "amcache_csv": (settings.MEDIA_URL + amc_rel) if amc_rel else None,
         "summary": ev.summary,
     })
+
+
+# ======== [RESULT FEEDERS] CSV → JSON สำหรับหน้า result ========
+
+def _csv_path_or_404(ev, rel_path: str | None) -> Path:
+    if not rel_path:
+        raise Http404("csv path not found")
+    p = Path(settings.MEDIA_ROOT) / rel_path
+    if not p.exists():
+        raise Http404("csv file not found")
+    return p
+
+def _str_to_int_default(s: str, default=0):
+    try:
+        return int((s or "0").replace(",", "").strip())
+    except Exception:
+        return default
+
+def _parse_ts_guess(s: str):
+    """
+    แปลง string → datetime ให้เป็น timezone-aware เสมอเมื่อ USE_TZ=True
+    รองรับฟอร์แมตพื้นฐาน; ถ้าแปลงไม่ได้คืน None
+    """
+    s = (s or "").strip()
+    if not s:
+        return None
+
+    # ISO/มาตรฐานของ Django ก่อน (เร็วสุด)
+    dt = parse_datetime(s)
+    if dt:
+        if settings.USE_TZ and dt.tzinfo is None:
+            dt = timezone.make_aware(dt, timezone.get_current_timezone())
+        return dt
+
+    # ฟอร์แมตที่พบได้บ่อย + เผื่อ microseconds
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%m/%d/%Y %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ):
+        try:
+            dt = datetime.strptime(s, fmt)
+            if settings.USE_TZ:
+                dt = timezone.make_aware(dt, timezone.get_current_timezone())
+            return dt
+        except Exception:
+            pass
+    return None
+
+
+def _as_bool(s: str) -> bool:
+    return str(s or "").strip().lower() in ("1", "true", "yes")
+
+# ---------- MFT (ORM) ----------
+def mft_rows_api(request, ev_id):
+    ev = Evidence.objects.filter(id=ev_id).first()
+    if not ev:
+        raise Http404("evidence not found")
+
+    page = int(request.GET.get("page", 1))
+    page_size = min(int(request.GET.get("page_size", 50)), 1000)
+    q = (request.GET.get("q", "") or "").strip()
+    type_filter = (request.GET.get("type", "") or "").lower()   # "", "file", "dir"
+    size_bucket = (request.GET.get("size_bucket", "") or "").lower()
+    sort_key = request.GET.get("sort", "EntryNumber")
+    order = (request.GET.get("order", "asc") or "asc").lower()
+
+    qs = MFTEntry.objects.filter(evidence=ev)
+
+    if q:
+        qs = qs.filter(Q(file_name__icontains=q) | Q(full_path__icontains=q))
+    if type_filter == "file":
+        qs = qs.filter(is_directory=False)
+    elif type_filter == "dir":
+        qs = qs.filter(is_directory=True)
+
+    if size_bucket == "small":
+        qs = qs.filter(size_bytes__lt=1*1024*1024)
+    elif size_bucket == "medium":
+        qs = qs.filter(size_bytes__gte=1*1024*1024, size_bytes__lte=100*1024*1024)
+    elif size_bucket == "large":
+        qs = qs.filter(size_bytes__gt=100*1024*1024)
+
+    sort_map = {
+        "EntryNumber": "entry_number",
+        "FileName": "file_name",
+        "FullPath": "full_path",
+        "Size": "size_bytes",
+        "Created": "created_ts",
+        "Modified": "modified_ts",
+    }
+    sfield = sort_map.get(sort_key, "entry_number")
+    if order == "desc":
+        sfield = "-" + sfield
+    qs = qs.order_by(sfield)
+
+    total = qs.count()
+    start = (page - 1) * page_size
+    rows = list(qs.values(
+        "entry_number","file_name","full_path","size_bytes","created_ts","modified_ts","is_directory"
+    )[start:start + page_size])
+
+    payload = []
+    for r in rows:
+        payload.append({
+            "EntryNumber": r["entry_number"],
+            "FileName": r["file_name"],
+            "FullPath": r["full_path"],
+            "Size": f'{r["size_bytes"]:,}',
+            "Created": r["created_ts"].isoformat() if r["created_ts"] else "",
+            "Modified": r["modified_ts"].isoformat() if r["modified_ts"] else "",
+            "IsDirectory": r["is_directory"],
+        })
+
+    return JsonResponse({
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "start_index": start + 1 if total else 0,
+        "end_index": min(start + page_size, total),
+        "rows": payload,
+    })
+
+# ---------- Amcache (ORM) ----------
+def amcache_rows_api(request, ev_id):
+    ev = Evidence.objects.filter(id=ev_id).first()
+    if not ev:
+        raise Http404("evidence not found")
+
+    page = int(request.GET.get("page", 1))
+    page_size = min(int(request.GET.get("page_size", 50)), 1000)
+    q = (request.GET.get("q", "") or "").strip()
+    publisher = (request.GET.get("publisher", "") or "").strip()
+    sort_key = request.GET.get("sort", "AppName")
+    order = (request.GET.get("order", "asc") or "asc").lower()
+
+    qs = AmcacheEntry.objects.filter(evidence=ev)
+    if q:
+        qs = qs.filter(
+            Q(app_name__icontains=q) |
+            Q(version__icontains=q) |
+            Q(publisher__icontains=q) |
+            Q(file_path__icontains=q)
+        )
+    if publisher:
+        qs = qs.filter(publisher__iexact=publisher)
+
+    sort_map = {
+        "AppName": "app_name",
+        "Version": "version",
+        "Publisher": "publisher",
+        "InstallDate": "install_date",
+        "FilePath": "file_path",
+    }
+    sfield = sort_map.get(sort_key, "app_name")
+    if order == "desc":
+        sfield = "-" + sfield
+    qs = qs.order_by(sfield)
+
+    total = qs.count()
+    start = (page - 1) * page_size
+    rows = list(qs.values("app_name","version","publisher","install_date","file_path")[start:start + page_size])
+
+    payload = []
+    for r in rows:
+        payload.append({
+            "AppName": r["app_name"],
+            "Version": r["version"] or "",
+            "Publisher": r["publisher"] or "",
+            "InstallDate": r["install_date"].isoformat() if r["install_date"] else "",
+            "FilePath": r["file_path"] or "",
+        })
+
+    publishers = list(
+        AmcacheEntry.objects.filter(evidence=ev)
+        .exclude(publisher__isnull=True)
+        .exclude(publisher__exact="")
+        .values_list("publisher", flat=True)
+        .distinct()
+        .order_by("publisher")
+    )
+
+    return JsonResponse({
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "start_index": start + 1 if total else 0,
+        "end_index": min(start + page_size, total),
+        "rows": payload,
+        "publishers": publishers,
+    })
+
+# === [ADD] helpers: normalizer + safe-int + ts parse ที่ใช้ซ้ำ ===
+def _norm_key(s: str) -> str:
+    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+def _canon_row(row: dict) -> dict:
+    return {_norm_key(k): v for k, v in row.items()}
+
+def _pick(nrow: dict, *aliases: str) -> str:
+    for a in aliases:
+        v = nrow.get(_norm_key(a), "")
+        if v not in (None, "", "NULL"):
+            return v
+    return ""
+
+def _to_int(s: str, default=0) -> int:
+    try:
+        return int(str(s or "0").replace(",", "").strip())
+    except Exception:
+        return default
+
+def _to_bool(s: str) -> bool:
+    return str(s or "").strip().lower() in ("1","true","yes")
+
+# === [ADD] Ingesters: อ่าน CSV ทีละบล็อกแล้ว bulk_create ลง DB ===
+def ingest_mft_csv_to_db(ev: Evidence, csv_path: Path, chunk=1000) -> int:
+    """
+    อ่าน parsed/mft.csv → MFTEntry แบบ batch เล็กลง (default 1000)
+    ทุก datetime เป็น timezone-aware แล้วค่อย bulk_create เพื่อลด OOM
+    """
+    from .models import MFTEntry
+    saved = 0
+    batch = []
+
+    with transaction.atomic():
+        with open(csv_path, "r", newline="", errors="ignore") as r:
+            dr = csv.DictReader(r)
+            for raw in dr:
+                n = _canon_row(raw)
+
+                entry_number = _to_int(_pick(n, "EntryNumber","Entry","RecordNumber"))
+                file_name    = _pick(n, "FileName","Name")
+                full_path    = _pick(n, "FullPath","ParentPath","Path","FilePath") or "."
+                size_bytes   = _to_int(_pick(n, "LogicalSize","Size"))
+                is_dir       = _to_bool(_pick(n, "IsDir","IsDirectory"))
+
+                created = _parse_ts_guess(_pick(n, "Created0x10","Created","CreationTime","CreationTimeUTC"))
+                modified = _parse_ts_guess(_pick(n, "Modified0x10","Modified","ModifiedTime","LastWriteTime"))
+                accessed = _parse_ts_guess(_pick(n, "Accessed0x10","Accessed","AccessTime"))
+                mftchg   = _parse_ts_guess(_pick(n, "MFTChanged0x10","MFTChanged","EntryModifiedTime"))
+
+                batch.append(MFTEntry(
+                    evidence=ev,
+                    entry_number=entry_number,
+                    is_directory=is_dir,
+                    file_name=file_name or "",
+                    full_path=full_path,
+                    size_bytes=size_bytes,
+                    created_ts=created,
+                    modified_ts=modified,
+                    accessed_ts=accessed,
+                    mft_changed_ts=mftchg,
+                ))
+
+                if len(batch) >= chunk:
+                    MFTEntry.objects.bulk_create(batch, ignore_conflicts=True, batch_size=chunk)
+                    saved += len(batch)
+                    batch.clear()
+
+        if batch:
+            MFTEntry.objects.bulk_create(batch, ignore_conflicts=True, batch_size=chunk)
+            saved += len(batch)
+
+    return saved
+
+
+
+def ingest_amcache_csv_to_db(ev: Evidence, csv_path: Path, chunk=1000) -> int:
+    """
+    อ่าน amcache_UnassociatedFileEntries.csv → AmcacheEntry
+    ใช้ batch เล็กลงเพื่อลด peak memory และทำเวลาให้ aware
+    """
+    from .models import AmcacheEntry
+    saved = 0
+    batch = []
+
+    with transaction.atomic():
+        with open(csv_path, "r", newline="", errors="ignore") as r:
+            dr = csv.DictReader(r)
+            for raw in dr:
+                n = _canon_row(raw)
+
+                app_name = _pick(n, "ProgramName","AppName","ProductName")
+                if not app_name:
+                    continue
+
+                version    = _pick(n, "Version","FileVersion","ProductVersion")
+                publisher  = _pick(n, "Publisher","Company","CompanyName")
+                install_dt = _parse_ts_guess(_pick(n, "InstallDate","InstallDateTime","InstallDateUTC","FirstInserted","FirstTime"))
+                file_path  = _pick(n, "Path","FilePath","FullPath","KeyPath")
+                sha1       = _pick(n, "SHA1","FileSHA1","SHA1Hash")
+                pe_hash    = _pick(n, "PEHash","PEHash32","PEHash64")
+
+                batch.append(AmcacheEntry(
+                    evidence=ev,
+                    app_name=app_name,
+                    version=version,
+                    publisher=publisher,
+                    install_date=install_dt,
+                    file_path=file_path,
+                    sha1=sha1,
+                    pe_hash=pe_hash,
+                    product_name=_pick(n, "ProductName"),
+                    extra={k: v for k, v in raw.items() if v not in (None, "")},
+                ))
+
+                if len(batch) >= chunk:
+                    AmcacheEntry.objects.bulk_create(batch, ignore_conflicts=True, batch_size=chunk)
+                    saved += len(batch)
+                    batch.clear()
+
+        if batch:
+            AmcacheEntry.objects.bulk_create(batch, ignore_conflicts=True, batch_size=chunk)
+            saved += len(batch)
+
+    return saved
+
+@require_GET
+def parser_preflight_api(request):
+    """
+    ตรวจความพร้อมก่อน run parser:
+      - docker cli
+      - image มีในเครื่อง
+      - media dirs เขียนได้
+      - เนื้อที่ดิสก์เหลือพอ
+    """
+    checks = {}
+
+    # docker cli
+    checks["docker_cli"] = _shutil.which("docker") is not None
+
+    # image
+    if checks["docker_cli"]:
+        rc, out = _docker_run(["docker", "image", "inspect", PARSER_IMAGE])
+        checks["parser_image_ok"] = (rc == 0)
+        checks["parser_image_output_tail"] = out[-1000:]
+    else:
+        checks["parser_image_ok"] = False
+        checks["parser_image_output_tail"] = ""
+
+    # media dirs
+    media_root = Path(settings.MEDIA_ROOT)
+    parsed_root = media_root / "parsed"
+    extracted_root = media_root / "extracted"
+    for p in (media_root, parsed_root, extracted_root):
+        p.mkdir(parents=True, exist_ok=True)
+
+    def _writable(p: Path) -> bool:
+        try:
+            testfile = p / ".write_test"
+            with open(testfile, "w") as w:
+                w.write("ok")
+            testfile.unlink(missing_ok=True)
+            return True
+        except Exception:
+            return False
+
+    checks["media_root_writable"] = _writable(media_root)
+    checks["parsed_writable"] = _writable(parsed_root)
+    checks["extracted_writable"] = _writable(extracted_root)
+
+    # disk usage
+    total, used, free = _shutil.disk_usage(str(media_root))
+    checks["disk_total_bytes"] = int(total)
+    checks["disk_used_bytes"] = int(used)
+    checks["disk_free_bytes"] = int(free)
+
+    return JsonResponse({"ok": all([
+        checks["docker_cli"],
+        checks["parser_image_ok"],
+        checks["media_root_writable"],
+        checks["parsed_writable"],
+        checks["extracted_writable"],
+    ]), "checks": checks})
