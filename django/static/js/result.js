@@ -1,12 +1,10 @@
 // static/js/result.js
 (function () {
-  // Helper: อ่าน evidence_id จาก DOM
+  // ===== Helpers =====
   function getEvidenceId() {
     const el = document.getElementById('evidenceId');
     return el ? el.textContent.trim() : null;
   }
-
-  // Helper: set text/badge
   function setText(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
@@ -15,10 +13,19 @@
     const el = document.getElementById(id);
     if (el) el.textContent = `${(n || 0).toLocaleString()} records`;
   }
-
   function numberWithCommas(x) {
     try { return (+String(x).replace(/,/g,'')).toLocaleString(); }
     catch { return x || "0"; }
+  }
+  function toInt(x, defv) {
+    const n = parseInt(x, 10);
+    return Number.isFinite(n) ? n : defv;
+  }
+  function sumBadges(ids) {
+    return ids
+      .map(id => document.getElementById(id)?.textContent || "0")
+      .map(t => toInt(String(t).replace(/,/g, ''), 0))
+      .reduce((a,b)=>a+b,0);
   }
 
   // สร้างปุ่ม Previous / เลขหน้า / Next ลงใน <nav id="...">
@@ -47,8 +54,7 @@
     });
   }
 
-
-  // Renderers
+  // ===== Renderers =====
   function renderMftRows(rows) {
     const tbody = document.getElementById('mftTableBody');
     if (!tbody) return;
@@ -84,14 +90,33 @@
     }
   }
 
-  // States (ถูกอ้างใน window ฟังก์ชันด้วย)
+  function renderSecurityRows(rows) {
+    const tbody = document.getElementById('securityTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    for (const r of rows) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${r.Timestamp ?? ''}</td>
+        <td>${r.EventID ?? ''}</td>
+        <td>${r.Message ?? ''}</td>
+        <td>${r.User ?? ''}</td>
+        <td>${r.SourceIP ?? ''}</td>
+        <td>${r.Computer ?? ''}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  // ===== State =====
   const state = {
     evId: null,
     mft: { page: 1, page_size: 50, q: '', type: '', size_bucket: '', sort: 'EntryNumber', order: 'asc' },
     amc: { page: 1, page_size: 50, q: '', publisher: '', sort: 'AppName', order: 'asc' },
+    sec: { page: 1, page_size: 50, q: '', event_id: '', logon_type: '', sort: 'Timestamp', order: 'desc' },
   };
 
-  // Loaders
+  // ===== Loaders =====
   async function loadMft() {
     const p = new URLSearchParams(state.mft).toString();
     const r = await fetch(`/api/evidence/${state.evId}/mft/?${p}`);
@@ -102,18 +127,15 @@
     setBadgeCount('mftCount', d.total);
     setText('mftRecords', numberWithCommas(d.total));
 
-    // วาด pagination และผูกเปลี่ยนหน้า
     buildPager('#mftPagination', state.mft.page, state.mft.page_size, d.total, (to) => {
       state.mft.page = to;
       loadMft();
     });
 
-    // อัปเดตรวมอย่างคร่าว ๆ (ถ้าอยากชัวร์ใช้ค่าจาก /api/evidence/<id>/ เหมือนเดิมก็ได้)
-    const amcacheBadge = document.getElementById('amcacheCount');
-    const amcacheNum = amcacheBadge ? parseInt(amcacheBadge.textContent) || 0 : 0;
-    setText('totalRecords', numberWithCommas(d.total + amcacheNum));
+    // อัปเดตรวม
+    const total = sumBadges(['mftRecords','amcacheRecords','eventLogRecords']);
+    setText('totalRecords', numberWithCommas(total));
   }
-
 
   async function loadAmcache() {
     const p = new URLSearchParams(state.amc).toString();
@@ -130,7 +152,7 @@
       loadAmcache();
     });
 
-    // เติม dropdown publisher (ครั้งแรกหรือจะรีเฟรชทุกครั้งก็ได้)
+    // เติม publisher dropdown ครั้งแรก
     const sel = document.getElementById('publisherFilter');
     if (sel && sel.options.length <= 1 && Array.isArray(d.publishers)) {
       for (const pub of d.publishers) {
@@ -141,33 +163,47 @@
       }
     }
 
-    const mftBadge = document.getElementById('mftCount');
-    const mftNum = mftBadge ? parseInt(mftBadge.textContent) || 0 : 0;
-    setText('totalRecords', numberWithCommas(d.total + mftNum));
+    const total = sumBadges(['mftRecords','amcacheRecords','eventLogRecords']);
+    setText('totalRecords', numberWithCommas(total));
   }
 
+  async function loadSecurity() {
+    const p = new URLSearchParams(state.sec).toString();
+    const r = await fetch(`/api/evidence/${state.evId}/security/?${p}`);
+    if (!r.ok) return;
+    const d = await r.json();
 
-  // Binding filters (MFT)
+    renderSecurityRows(d.rows);
+    setBadgeCount('securityCount', d.total);
+    setText('eventLogRecords', numberWithCommas(d.total));
+
+    buildPager('#securityPagination', state.sec.page, state.sec.page_size, d.total, (to) => {
+      state.sec.page = to;
+      loadSecurity();
+    });
+
+    const total = sumBadges(['mftRecords','amcacheRecords','eventLogRecords']);
+    setText('totalRecords', numberWithCommas(total));
+  }
+
+  // ===== Bindings =====
   function bindMftFilters() {
     const mftSearch = document.getElementById('mftSearch');
     const mftTypeFilter = document.getElementById('mftTypeFilter');
     const mftSizeFilter = document.getElementById('mftSizeFilter');
 
     if (mftSearch) mftSearch.addEventListener('input', () => { state.mft.q = mftSearch.value; state.mft.page = 1; loadMft(); });
-
     if (mftTypeFilter) mftTypeFilter.addEventListener('change', () => {
       const v = (mftTypeFilter.value || '').toLowerCase();
       state.mft.type = (v === 'directory') ? 'dir' : (v === 'file') ? 'file' : '';
       state.mft.page = 1; loadMft();
     });
-
     if (mftSizeFilter) mftSizeFilter.addEventListener('change', () => {
       state.mft.size_bucket = mftSizeFilter.value || '';
       state.mft.page = 1; loadMft();
     });
   }
 
-  // Binding filters (Amcache)
   function bindAmcacheFilters() {
     const amcacheSearch = document.getElementById('amcacheSearch');
     const publisherFilter = document.getElementById('publisherFilter');
@@ -176,11 +212,26 @@
     if (publisherFilter) publisherFilter.addEventListener('change', () => { state.amc.publisher = publisherFilter.value; state.amc.page = 1; loadAmcache(); });
   }
 
-  // Expose functions used by HTML onclicks
+  function bindSecurityFilters() {
+    const q = document.getElementById('securitySearch');
+    const eventIdFilter = document.getElementById('eventIdFilter');
+    const logonTypeFilter = document.getElementById('logonTypeFilter');
+
+    if (q) q.addEventListener('input', () => { state.sec.q = q.value; state.sec.page = 1; loadSecurity(); });
+    if (eventIdFilter) eventIdFilter.addEventListener('change', () => {
+      state.sec.event_id = eventIdFilter.value || '';
+      state.sec.page = 1; loadSecurity();
+    });
+    if (logonTypeFilter) logonTypeFilter.addEventListener('change', () => {
+      state.sec.logon_type = logonTypeFilter.value || '';
+      state.sec.page = 1; loadSecurity();
+    });
+  }
+
+  // ===== Exposed actions (onclick) =====
   window.clearFilters = function (section) {
     if (section === 'mft') {
       state.mft = { page: 1, page_size: 50, q: '', type: '', size_bucket: '', sort: 'EntryNumber', order: 'asc' };
-      // reset UI controls
       const mftSearch = document.getElementById('mftSearch');
       const mftTypeFilter = document.getElementById('mftTypeFilter');
       const mftSizeFilter = document.getElementById('mftSizeFilter');
@@ -188,53 +239,68 @@
       if (mftTypeFilter) mftTypeFilter.value = '';
       if (mftSizeFilter) mftSizeFilter.value = '';
       loadMft();
-    } else if (section === 'amcache') {
+      return;
+    }
+    if (section === 'amcache') {
       state.amc = { page: 1, page_size: 50, q: '', publisher: '', sort: 'AppName', order: 'asc' };
       const amcacheSearch = document.getElementById('amcacheSearch');
       const publisherFilter = document.getElementById('publisherFilter');
       if (amcacheSearch) amcacheSearch.value = '';
       if (publisherFilter) publisherFilter.value = '';
       loadAmcache();
+      return;
+    }
+    if (section === 'security') {
+      state.sec = { page: 1, page_size: 50, q: '', event_id: '', logon_type: '', sort: 'Timestamp', order: 'desc' };
+      const q = document.getElementById('securitySearch');
+      const e = document.getElementById('eventIdFilter');
+      const l = document.getElementById('logonTypeFilter');
+      if (q) q.value = '';
+      if (e) e.value = '';
+      if (l) l.value = '';
+      loadSecurity();
+      return;
     }
   };
 
-  // sortTable('mftTable', idx) / sortTable('amcacheTable', idx)
+  // sortTable('mftTable' | 'amcacheTable' | 'securityTable', idx)
   window.sortTable = function (tableId, colIdx) {
     if (tableId === 'mftTable') {
       const map = { 0: 'EntryNumber', 1: 'FileName', 2: 'FullPath', 3: 'Size', 4: 'Created', 5: 'Modified' };
       const key = map[colIdx] || 'EntryNumber';
-      if (state.mft.sort === key) {
-        state.mft.order = state.mft.order === 'asc' ? 'desc' : 'asc';
-      } else {
-        state.mft.sort = key; state.mft.order = 'asc';
-      }
-      state.mft.page = 1;
-      loadMft();
-    } else if (tableId === 'amcacheTable') {
+      if (state.mft.sort === key) state.mft.order = state.mft.order === 'asc' ? 'desc' : 'asc';
+      else { state.mft.sort = key; state.mft.order = 'asc'; }
+      state.mft.page = 1; loadMft(); return;
+    }
+    if (tableId === 'amcacheTable') {
       const map = { 0: 'AppName', 1: 'Version', 2: 'Publisher', 3: 'InstallDate', 4: 'FilePath' };
       const key = map[colIdx] || 'AppName';
-      if (state.amc.sort === key) {
-        state.amc.order = state.amc.order === 'asc' ? 'desc' : 'asc';
-      } else {
-        state.amc.sort = key; state.amc.order = 'asc';
-      }
-      state.amc.page = 1;
-      loadAmcache();
+      if (state.amc.sort === key) state.amc.order = state.amc.order === 'asc' ? 'desc' : 'asc';
+      else { state.amc.sort = key; state.amc.order = 'asc'; }
+      state.amc.page = 1; loadAmcache(); return;
+    }
+    if (tableId === 'securityTable') {
+      // หมายเหตุ: Backend รองรับ sort = Timestamp, EventID, User, Computer (Message ไม่ได้แมปใน backend)
+      const map = { 0: 'Timestamp', 1: 'EventID', 2: 'Message', 3: 'User', 4: 'Computer' };
+      const key = map[colIdx] || 'Timestamp';
+      if (state.sec.sort === key) state.sec.order = state.sec.order === 'asc' ? 'desc' : 'asc';
+      else { state.sec.sort = key; state.sec.order = 'asc'; }
+      state.sec.page = 1; loadSecurity(); return;
     }
   };
 
-  // Export เป็น CSV ง่าย ๆ จาก rows ล่าสุดที่ render (front-end)
+  // Export CSV เฉพาะ tab ปัจจุบัน
   window.exportResults = function () {
-    // เตรียม export เฉพาะ tab ที่โชว์อยู่
     const active = document.querySelector('.tab-pane.active.show');
-    let table;
-    if (active && active.id === 'mft') table = document.getElementById('mftTable');
-    else if (active && active.id === 'amcache') table = document.getElementById('amcacheTable');
+    let table, fname = '';
+    if (active && active.id === 'mft') { table = document.getElementById('mftTable'); fname = 'mft_view.csv'; }
+    else if (active && active.id === 'amcache') { table = document.getElementById('amcacheTable'); fname = 'amcache_view.csv'; }
+    else if (active && active.id === 'security') { table = document.getElementById('securityTable'); fname = 'security_view.csv'; }
     else return;
 
     const rows = [];
     const ths = table.querySelectorAll('thead th');
-    const headers = Array.from(ths).map(th => th.textContent.replace(/\s+$/,'').replace(/\s*\u{f0dc}\s*$/u,'').trim()); // ตัดไอคอน sort
+    const headers = Array.from(ths).map(th => th.textContent.replace(/\s+$/,'').replace(/\s*\u{f0dc}\s*$/u,'').trim());
     rows.push(headers.join(','));
 
     const trs = table.querySelectorAll('tbody tr');
@@ -249,26 +315,24 @@
     const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = (active && active.id === 'mft') ? 'mft_view.csv' : 'amcache_view.csv';
-    document.body.appendChild(a);
-    a.click();
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
-  // Init
+  // ===== Init =====
   document.addEventListener('DOMContentLoaded', async function () {
     state.evId = getEvidenceId();
     if (!state.evId) return;
 
     bindMftFilters();
     bindAmcacheFilters();
+    bindSecurityFilters();
 
-    // ยิงโหลดครั้งแรก
-    await Promise.all([loadMft(), loadAmcache()]);
+    await Promise.all([loadMft(), loadAmcache(), loadSecurity()]);
 
-    // ดึง summary มาเติมสถิติ รวมเลขเร็วๆ
+    // เติมสรุปจาก /api/evidence/<id>/ ถ้ามี
     try {
       const r0 = await fetch(`/api/evidence/${state.evId}/`);
       if (r0.ok) {
@@ -276,14 +340,14 @@
         if (d0.summary) {
           if (typeof d0.summary.mft_rows === 'number') setText('mftRecords', d0.summary.mft_rows.toLocaleString());
           if (typeof d0.summary.amcache_rows === 'number') setText('amcacheRecords', d0.summary.amcache_rows.toLocaleString());
-          if (typeof d0.summary.mft_rows === 'number' || typeof d0.summary.amcache_rows === 'number') {
-            const a = d0.summary.mft_rows || 0, b = d0.summary.amcache_rows || 0;
-            setText('totalRecords', (a + b).toLocaleString());
-          }
+          const secCount = d0.summary.security_events_rows_db || d0.summary.security_events_rows || d0.summary.security_rows || 0;
+          if (secCount) setText('eventLogRecords', secCount.toLocaleString());
+          const total = sumBadges(['mftRecords','amcacheRecords','eventLogRecords']);
+          if (total) setText('totalRecords', numberWithCommas(total));
         }
       }
     } catch (e) {
-      // เงียบ ๆ ถ้า fail
+      // เงียบไว้ก็ได้
     }
   });
 })();

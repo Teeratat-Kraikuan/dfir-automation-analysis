@@ -8,5 +8,8 @@ urlpatterns = [
     path("evidence/<int:ev_id>/", views.evidence_detail_api, name="evidence_detail_api"),
     path("evidence/<int:ev_id>/mft/", views.mft_rows_api, name="mft_rows_api"),
     path("evidence/<int:ev_id>/amcache/", views.amcache_rows_api, name="amcache_rows_api"),
+    path("evidence/<int:ev_id>/security/", views.security_events_rows_api, name="security_rows_api"),
+    path("evidence/<int:ev_id>/security/rows", views.security_events_rows_api),  # alias no-trailing-slash
+    path("evidence/<int:ev_id>/security/summary", views.security_events_summary_api, name="security_summary_api"),
     path("api/preflight/", views.parser_preflight_api, name="parser_preflight"),
 ]

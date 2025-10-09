@@ -1,4 +1,3 @@
-# django/api/views.py
 import os
 import hashlib
 import zipfile
@@ -18,9 +17,10 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from django.db.models import Q
+from django.db.models import Q, Count
+from django.shortcuts import get_object_or_404
 
-from .models import Case, Evidence, MFTEntry, AmcacheEntry
+from .models import Case, Evidence, MFTEntry, AmcacheEntry, SecurityEvent
 
 
 # ===== Config from ENV / settings =====
@@ -76,6 +76,35 @@ def _find_kape_artifacts(extracted_root: Path) -> Tuple[Optional[Path], Optional
             if not amc_path:
                 amc_path = _find_first_name(base, "amcache.hve", skip_dirs={"Parsed"})
     return mft_path, amc_path
+
+
+def _find_winevt_logs_dir(extracted_root: Path) -> Optional[Path]:
+    """
+    พยายามหาโฟลเดอร์ winevt/Logs จากเค้าโครง KAPE/Windows ปกติ
+    ถ้าไม่เจอในตำแหน่งมาตรฐาน จะเดินหา dir ที่ลงท้าย 'winevt/Logs'
+    """
+    candidates = [
+        extracted_root / "KAPE" / "Triage" / "Windows" / "System32" / "winevt" / "Logs",
+        extracted_root / "Triage" / "Windows" / "System32" / "winevt" / "Logs",
+        extracted_root / "Windows" / "System32" / "winevt" / "Logs",
+        extracted_root / "Windows" / "winevt" / "Logs",
+        extracted_root / "System32" / "winevt" / "Logs",
+        extracted_root / "winevt" / "Logs",
+    ]
+    for p in candidates:
+        if p.exists() and p.is_dir():
+            return p
+
+    # fallback เดินหา
+    for dirpath, dirnames, _filenames in os.walk(extracted_root):
+        # speed: prune 'Parsed'
+        if "Parsed" in dirnames:
+            dirnames.remove("Parsed")
+        path = Path(dirpath)
+        parts = [pp.lower() for pp in path.parts[-2:]]  # last 2 parts
+        if len(parts) >= 2 and parts[-2] == "winevt" and parts[-1] == "logs":
+            return path
+    return None
 
 
 def _docker_run(args: list[str]) -> tuple[int, str]:
@@ -217,7 +246,6 @@ def start_extract_api(request):
         if hasattr(ev, "extracted_dir"):
             ev.extracted_dir = str(out_dir)
         else:
-            # ถ้าโมเดลไม่มีฟิลด์นี้ ก็ถือว่าพร้อม (ยังใช้งานต่อได้ในฟังก์ชัน parse โดยคำนวณจาก MEDIA_ROOT)
             pass
 
         ev.parse_message = "ready"
@@ -239,8 +267,10 @@ def start_parse_api(request):
     """
     หลังแตก ZIP:
       - หา $MFT และ Amcache.hve
+      - หา winevt/Logs (Windows Event Logs)
       - docker run PARSER_IMAGE เพื่อแปลง CSV → MEDIA_ROOT/parsed/<id>/
-      - จากนั้น ingest CSV → DB (MFTEntry/AmcacheEntry) แบบลบของเก่าทีละชนิด เพื่อลด peak memory
+      - จากนั้น ingest CSV → DB (MFTEntry / AmcacheEntry / SecurityEvent)
+      - ทำแบบล้างชนิดต่อชนิดเพื่อลด peak memory
     """
     ev_id = request.POST.get("id")
     if not ev_id:
@@ -261,6 +291,7 @@ def start_parse_api(request):
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
     mft_path, amc_path = _find_kape_artifacts(extracted)
+    evtx_dir = _find_winevt_logs_dir(extracted)
 
     ev.parse_status = getattr(Evidence.ParseStatus, "RUNNING", "RUNNING")
     ev.parse_message = "parsing"
@@ -294,7 +325,15 @@ def start_parse_api(request):
             "log_tail": out_img[-2000:],
         }, status=500)
 
-    def run_parser(kind: str, in_abs: Path, out_csv_name: str) -> tuple[bool, str]:
+    def run_parser(kind: str, in_abs: Path | None, out_csv_name: str) -> tuple[bool, str]:
+        """
+        kind: 'mft' | 'amcache' | 'evtx-dir'
+        in_abs: สำหรับ evtx-dir เป็น 'directory', ที่เหลือเป็นไฟล์
+        """
+        if in_abs is None:
+            return False, "no input"
+
+        # สำหรับ 'evtx-dir' เราจะส่งเป็นโฟลเดอร์ relative to extracted
         rel_in = in_abs.relative_to(extracted).as_posix()
         in_path = f"{DOCKER_VOLUME_MOUNTPOINT}/extracted/{ev.id}/{rel_in}"
         out_dir = f"{DOCKER_VOLUME_MOUNTPOINT}/parsed/{ev.id}"
@@ -303,10 +342,13 @@ def start_parse_api(request):
         if PARSER_PLATFORM:
             args += ["--platform", PARSER_PLATFORM]
         args += ["-v", f"{DOCKER_VOLUME_MEDIA}:{DOCKER_VOLUME_MOUNTPOINT}", PARSER_IMAGE]
+
         if kind == "mft":
             args += ["mft", in_path, out_dir, out_csv_name]
         elif kind == "amcache":
             args += ["amcache", in_path, out_dir, out_csv_name]
+        elif kind == "evtx-dir":
+            args += ["evtx-dir", in_path, out_dir, out_csv_name]
         else:
             raise ValueError("unknown kind")
 
@@ -314,10 +356,11 @@ def start_parse_api(request):
         log_lines.append(f"$ {' '.join(args)}\n{out}\n(rc={rc})\n")
         return rc == 0, out
 
-    # ==== รันตามที่พบไฟล์ ==== 
+    # ==== รันตามที่พบไฟล์/โฟลเดอร์ ====
     mft_rel: Optional[str] = None
     amcache_focus_rel: Optional[str] = None
     amcache_all_rels: list[str] = []
+    evtx_rel: Optional[str] = None
 
     # MFT
     if mft_path:
@@ -361,8 +404,20 @@ def start_parse_api(request):
     else:
         log_lines.append("! Amcache.hve not found under extracted path\n")
 
+    # EVTX (Security/System/Application)
+    if evtx_dir and evtx_dir.exists():
+        ok, _out = run_parser("evtx-dir", evtx_dir, "evtx_all.csv")
+        evtx_csv_abs = parsed_dir / "evtx_all.csv"
+        if ok and _exists_nonempty(evtx_csv_abs):
+            evtx_rel = f"parsed/{ev.id}/evtx_all.csv"
+            summ = dict(getattr(ev, "summary", {}) or {})
+            summ["evtx_csv"] = evtx_rel
+            ev.summary = summ
+    else:
+        log_lines.append("! winevt/Logs directory not found under extracted path\n")
+
     # ==== อัปเดตสถานะ + สรุปเร็ว ๆ ====
-    produced_any = bool(mft_rel or amcache_focus_rel)
+    produced_any = bool(mft_rel or amcache_focus_rel or evtx_rel)
     if produced_any:
         ev.parse_status = getattr(Evidence.ParseStatus, "DONE", "DONE")
         ev.parse_message = "parsed"
@@ -385,6 +440,10 @@ def start_parse_api(request):
                 cnt = _count_rows_if_small(Path(settings.MEDIA_ROOT) / amcache_focus_rel)
                 if cnt is not None:
                     summary["amcache_rows"] = cnt
+            if evtx_rel:
+                cnt = _count_rows_if_small(Path(settings.MEDIA_ROOT) / evtx_rel)
+                if cnt is not None:
+                    summary["evtx_rows"] = cnt
         except Exception:
             pass
         ev.summary = summary
@@ -413,6 +472,16 @@ def start_parse_api(request):
                 summary["amcache_rows_db"] = inserted
                 ev.summary = summary
                 ev.save(update_fields=["summary"])
+
+        if evtx_rel:
+            with transaction.atomic():
+                SecurityEvent.objects.filter(evidence=ev).delete()
+                evtx_csv_abs = Path(settings.MEDIA_ROOT) / evtx_rel
+                inserted = ingest_evtx_csv_to_db(ev, evtx_csv_abs, chunk=2000)
+                summary = dict(getattr(ev, "summary", {}) or {})
+                summary["security_events_rows_db"] = inserted
+                ev.summary = summary
+                ev.save(update_fields=["summary"])
     except Exception as _ing_e:
         if hasattr(ev, "parse_log"):
             ev.parse_log = (ev.parse_log or "") + f"\ningest error: {repr(_ing_e)}"
@@ -429,6 +498,7 @@ def start_parse_api(request):
         "mft_csv": (settings.MEDIA_URL + mft_rel) if mft_rel else None,
         "amcache_csv": (settings.MEDIA_URL + amcache_focus_rel) if amcache_focus_rel else None,
         "amcache_all": [settings.MEDIA_URL + x for x in amcache_all_rels] if amcache_all_rels else [],
+        "evtx_csv": (settings.MEDIA_URL + evtx_rel) if evtx_rel else None,
         "mft_filelisting": (
             settings.MEDIA_URL + ev.summary.get("mft_filelisting")
             if getattr(ev, "summary", None) and ev.summary.get("mft_filelisting") else None
@@ -436,6 +506,7 @@ def start_parse_api(request):
         "log_tail": "\n".join(log_lines[-10:]),
         "summary": ev.summary,
     })
+
 
 def evidence_detail_api(request, ev_id):
     """
@@ -461,6 +532,12 @@ def evidence_detail_api(request, ev_id):
         if p.exists():
             amc_rel = f"parsed/{ev.id}/amcache_UnassociatedFileEntries.csv"
 
+    # ลิงก์ EVTX ถ้ามี
+    evtx_rel = None
+    p_ev = Path(settings.MEDIA_ROOT) / "parsed" / str(ev.id) / "evtx_all.csv"
+    if p_ev.exists():
+        evtx_rel = f"parsed/{ev.id}/evtx_all.csv"
+
     return JsonResponse({
         "id": str(ev.id),
         "case_id": str(ev.case_id),
@@ -477,6 +554,7 @@ def evidence_detail_api(request, ev_id):
         "updated_at": ev.updated_at.isoformat(),
         "mft_csv": (settings.MEDIA_URL + mft_rel) if mft_rel else None,
         "amcache_csv": (settings.MEDIA_URL + amc_rel) if amc_rel else None,
+        "evtx_csv": (settings.MEDIA_URL + evtx_rel) if evtx_rel else None,
         "summary": ev.summary,
     })
 
@@ -799,6 +877,71 @@ def ingest_amcache_csv_to_db(ev: Evidence, csv_path: Path, chunk=1000) -> int:
 
     return saved
 
+
+def ingest_evtx_csv_to_db(ev: Evidence, csv_path: Path, chunk=2000) -> int:
+    """
+    อ่าน evtx_all.csv (จาก EvtxECmd) → SecurityEvent
+    รองรับ Header ที่ต่างกันได้ด้วย normalizer; ค่าที่ไม่เข้าคอลัมน์หลักจะเก็บลง event_data (JSON)
+    """
+    saved = 0
+    batch: list[SecurityEvent] = []
+
+    # คีย์ header ที่ถือว่าเป็น "หลัก"
+    core_keys = {
+        "timestamp","timecreated","created",
+        "eventid","provider","channel","computer","user","userid","recordnumber","recordid",
+        "level","task","opcode","keywords","processid","threadid","message","sid","pid","tid","log","source"
+    }
+
+    with transaction.atomic():
+        with open(csv_path, "r", newline="", errors="ignore", encoding="utf-8-sig") as r:
+            dr = csv.DictReader(r)
+            for raw in dr:
+                n = _canon_row(raw)
+
+                eid = _to_int(_pick(n, "EventID"))
+                if eid == 0:
+                    # ไม่มี EventID → ข้าม
+                    continue
+
+                ts = _pick(n, "Timestamp","TimeCreated","Created")
+                dt = _parse_ts_guess(ts)
+
+                event = SecurityEvent(
+                    evidence   = ev,
+                    timestamp  = dt,
+                    channel    = _pick(n, "Channel","Log"),
+                    provider   = _pick(n, "Provider","Source"),
+                    event_id   = eid,
+                    level      = _pick(n, "Level"),
+                    task       = _pick(n, "Task"),
+                    opcode     = _pick(n, "Opcode"),
+                    keywords   = _pick(n, "Keywords"),
+                    record_id  = _to_int(_pick(n, "RecordNumber","RecordId")),
+                    computer   = _pick(n, "Computer"),
+                    user_sid   = _pick(n, "UserID","Sid"),
+                    user_name  = _pick(n, "User"),
+                    process_id = _to_int(_pick(n, "ProcessID","PID")),
+                    thread_id  = _to_int(_pick(n, "ThreadID","TID")),
+                    message    = _pick(n, "Message"),
+                    event_data = {k: v for k, v in raw.items()
+                                  if v not in (None, "")
+                                  and _norm_key(k) not in core_keys},
+                )
+                batch.append(event)
+
+                if len(batch) >= chunk:
+                    SecurityEvent.objects.bulk_create(batch, ignore_conflicts=True, batch_size=chunk)
+                    saved += len(batch)
+                    batch.clear()
+
+        if batch:
+            SecurityEvent.objects.bulk_create(batch, ignore_conflicts=True, batch_size=chunk)
+            saved += len(batch)
+
+    return saved
+
+
 @require_GET
 def parser_preflight_api(request):
     """
@@ -856,3 +999,122 @@ def parser_preflight_api(request):
         checks["parsed_writable"],
         checks["extracted_writable"],
     ]), "checks": checks})
+
+
+# ---------- NEW: Security Events (ORM APIs) ----------
+@require_GET
+def security_events_rows_api(request, ev_id: int):
+    # --- ตรวจ evidence ---
+    try:
+        ev = Evidence.objects.get(id=ev_id)
+    except Evidence.DoesNotExist:
+        raise Http404("evidence not found")
+
+    # --- รับพารามิเตอร์จาก query ---
+    q = (request.GET.get("q") or "").strip()
+    event_id = (request.GET.get("event_id") or "").strip()
+    logon_type = (request.GET.get("logon_type") or "").strip()
+
+    try:
+        page = int(request.GET.get("page", "1"))
+        page_size = int(request.GET.get("page_size", "50"))
+    except ValueError:
+        page, page_size = 1, 50
+    page = max(1, page)
+    page_size = max(1, min(page_size, 1000))
+
+    sort = (request.GET.get("sort") or "Timestamp").strip()
+    order = (request.GET.get("order") or "desc").strip().lower()
+
+    # ✅ ใช้ชื่อฟิลด์ที่ "มีจริง" ในโมเดลเท่านั้น
+    # ถ้าต้องการ sort ตาม IP ให้สั่งไปที่ key ใน JSON: event_data__IpAddress
+    sortmap = {
+        "Timestamp": "timestamp",
+        "EventID": "event_id",
+        "User": "user_name",
+        "Computer": "computer",
+        # "SourceIP": "event_data__IpAddress",  # เปิดใช้ถ้าอยาก sort ตาม IP ใน Postgres/JSONField
+    }
+    sort_field = sortmap.get(sort, "timestamp")
+    if order == "desc":
+        sort_field = f"-{sort_field}"
+
+    # --- base queryset ---
+    qs = SecurityEvent.objects.filter(evidence=ev).order_by(sort_field)
+
+    # --- ค้นหาแบบกว้าง ---
+    if q:
+        qs = qs.filter(
+            Q(message__icontains=q) |
+            Q(user_name__icontains=q) |
+            Q(computer__icontains=q) |
+            Q(provider__icontains=q)
+        )
+
+    # --- filter ตาม event_id ---
+    if event_id:
+        try:
+            eid_int = int(event_id)
+            qs = qs.filter(event_id=eid_int)
+        except ValueError:
+            pass
+
+    # --- filter logon_type (ส่วนใหญ่ใช้กับ 4624/4625) ---
+    if logon_type:
+        # ดึงจาก JSON key ที่พบบ่อย เช่น LogonType / Logon_Type
+        qs = qs.filter(
+            Q(event_id__in=[4624, 4625]) &
+            (
+                Q(event_data__LogonType=logon_type) |
+                Q(event_data__Logon_Type=logon_type)
+            )
+        )
+
+    total = qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+
+    rows = []
+    # ✅ ดึงเฉพาะฟิลด์ที่มี + event_data (ไว้คาย IP)
+    for r in qs.values("timestamp", "event_id", "message", "user_name", "computer", "event_data")[start:end]:
+        ts = r["timestamp"]
+        if isinstance(ts, datetime):
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            ts_str = str(ts) if ts is not None else ""
+
+        ed = r.get("event_data") or {}
+        # ✅ เดา key IP จากหลายชื่อที่เจอบ่อย
+        src_ip = (
+            ed.get("IpAddress")
+            or ed.get("Ip")
+            or ed.get("SourceIp")
+            or ed.get("SourceIPAddress")
+            or ed.get("SourceNetworkAddress")
+            or ed.get("ClientAddress")
+            or ""
+        )
+
+        rows.append({
+            "Timestamp": ts_str,
+            "EventID": r.get("event_id") or "",
+            "User": r.get("user_name") or "",
+            "Computer": r.get("computer") or "",
+            "SourceIP": src_ip or "",
+            "Message": r.get("message") or "",
+        })
+
+    return JsonResponse({
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "start_index": start + 1 if total else 0,
+        "end_index": min(end, total),
+        "rows": rows,
+    })
+
+
+def security_events_summary_api(request, ev_id: int):
+    ev = get_object_or_404(Evidence, id=ev_id)
+    total = SecurityEvent.objects.filter(evidence=ev).count()
+    return JsonResponse({"ok": True, "total": total})

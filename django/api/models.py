@@ -143,3 +143,33 @@ class AmcacheEntry(models.Model):
         indexes = [
             models.Index(fields=["evidence", "install_date"]),
         ]
+
+
+# ---------- NEW: Windows Security Events (EVTX → DB) ----------
+class SecurityEvent(models.Model):
+    evidence   = models.ForeignKey(Evidence, on_delete=models.CASCADE, related_name="security_events", db_index=True)
+    timestamp  = models.DateTimeField(null=True, blank=True, db_index=True)
+    channel    = models.CharField(max_length=128, blank=True, db_index=True)   # e.g. Security, System
+    provider   = models.CharField(max_length=256, blank=True, db_index=True)
+    event_id   = models.IntegerField(db_index=True)
+    level      = models.CharField(max_length=32, blank=True)
+    task       = models.CharField(max_length=128, blank=True)
+    opcode     = models.CharField(max_length=128, blank=True)
+    keywords   = models.CharField(max_length=256, blank=True)
+    record_id  = models.BigIntegerField(null=True, blank=True)
+    computer   = models.CharField(max_length=255, blank=True, db_index=True)
+    user_sid   = models.CharField(max_length=256, blank=True)
+    user_name  = models.CharField(max_length=256, blank=True, db_index=True)
+    process_id = models.IntegerField(null=True, blank=True)
+    thread_id  = models.IntegerField(null=True, blank=True)
+    message    = models.TextField(blank=True)
+    event_data = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["evidence", "event_id"]),
+            models.Index(fields=["evidence", "timestamp"]),
+            models.Index(fields=["evidence", "channel", "event_id"]),
+            models.Index(fields=["evidence", "user_name"]),
+            models.Index(fields=["evidence", "computer"]),
+        ]

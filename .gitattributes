@@ -1,0 +1,14 @@
+# default: ปล่อยให้ git จัดการอัตโนมัติ
+* text=auto
+
+# โค้ด/สคริปต์ที่ควรเป็น LF เสมอ
+*.py   text eol=lf
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# เอกสาร markdown จะใช้ LF เพื่อกันชาร์ป diff ข้ามแพลตฟอร์ม
+*.md   text eol=lf
+
+# บังคับ Maps ของ EvtxECmd ให้เป็น LF เสมอ (ตรงตาม upstream)
+parsers/tools/EvtxECmd/Maps/* text eol=lf

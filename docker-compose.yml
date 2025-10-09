@@ -16,7 +16,7 @@ volumes:
       o: bind
       device: ./django
   media:
-    name: media                  # ใช้ชื่อ volume ชัด ๆ (ให้ django และ docker run ใช้ร่วมกันได้)
+    name: media
     driver: local
     driver_opts:
       type: none
