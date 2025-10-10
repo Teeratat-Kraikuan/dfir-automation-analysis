@@ -17,10 +17,11 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from django.db.models import Q, Count
+from django.db.models import Q, F, Count
 from django.shortcuts import get_object_or_404
 
 from .models import Case, Evidence, MFTEntry, AmcacheEntry, SecurityEvent
+from .utils.security_describer import describe_event
 
 
 # ===== Config from ENV / settings =====
@@ -778,11 +779,24 @@ def _to_bool(s: str) -> bool:
 def ingest_mft_csv_to_db(ev: Evidence, csv_path: Path, chunk=1000) -> int:
     """
     อ่าน parsed/mft.csv → MFTEntry แบบ batch เล็กลง (default 1000)
-    ทุก datetime เป็น timezone-aware แล้วค่อย bulk_create เพื่อลด OOM
+    - ใช้ FileSize เป็นหลักตามโครง CSV ที่ให้มา
+    - ถ้าไม่มี FullPath ให้ประกอบ Path จาก ParentPath + FileName
+    - โฟลเดอร์ size เป็น 0 เสมอ
     """
     from .models import MFTEntry
     saved = 0
     batch = []
+
+    def _join_path(parent: str, name: str) -> str:
+        parent = (parent or "").strip()
+        name = (name or "").strip()
+        if not parent and not name:
+            return "."
+        if parent in (".", ""):
+            return name or "."
+        # ใช้สไตล์ Windows ให้สวยตา (กันซ้ำเครื่องหมายคั่น)
+        sep = "\\" if "\\" in parent or "\\" in name else "\\"
+        return parent.rstrip("\\/") + sep + name
 
     with transaction.atomic():
         with open(csv_path, "r", newline="", errors="ignore") as r:
@@ -791,22 +805,32 @@ def ingest_mft_csv_to_db(ev: Evidence, csv_path: Path, chunk=1000) -> int:
                 n = _canon_row(raw)
 
                 entry_number = _to_int(_pick(n, "EntryNumber","Entry","RecordNumber"))
-                file_name    = _pick(n, "FileName","Name")
-                full_path    = _pick(n, "FullPath","ParentPath","Path","FilePath") or "."
-                size_bytes   = _to_int(_pick(n, "LogicalSize","Size"))
-                is_dir       = _to_bool(_pick(n, "IsDir","IsDirectory"))
 
-                created = _parse_ts_guess(_pick(n, "Created0x10","Created","CreationTime","CreationTimeUTC"))
-                modified = _parse_ts_guess(_pick(n, "Modified0x10","Modified","ModifiedTime","LastWriteTime"))
-                accessed = _parse_ts_guess(_pick(n, "Accessed0x10","Accessed","AccessTime"))
-                mftchg   = _parse_ts_guess(_pick(n, "MFTChanged0x10","MFTChanged","EntryModifiedTime"))
+                file_name  = _pick(n, "FileName","Name")
+                # ถ้า CSV ไม่มี FullPath (ตามตัวอย่าง) ให้สร้างจาก ParentPath + FileName
+                full_path  = _pick(n, "FullPath","FilePath")
+                if not full_path:
+                    parent = _pick(n, "ParentPath","Path")
+                    full_path = _join_path(parent, file_name)
+
+                # โฟลเดอร์?
+                is_dir = _to_bool(_pick(n, "IsDirectory","IsDir","Directory","Dir"))
+
+                # ขนาดไฟล์: ใช้ FileSize เป็นหลัก ตามที่คุณยืนยันมา
+                size_bytes = 0 if is_dir else _to_int(_pick(n, "FileSize","LogicalSize","Size"))
+
+                # เวลา
+                created  = _parse_ts_guess(_pick(n, "Created0x10","Created","CreationTime","CreationTimeUTC"))
+                modified = _parse_ts_guess(_pick(n, "LastModified0x10","Modified0x10","Modified","ModifiedTime","LastWriteTime"))
+                accessed = _parse_ts_guess(_pick(n, "LastAccess0x10","Accessed0x10","Accessed","AccessTime"))
+                mftchg   = _parse_ts_guess(_pick(n, "LastRecordChange0x10","MFTChanged0x10","MFTChanged","EntryModifiedTime"))
 
                 batch.append(MFTEntry(
                     evidence=ev,
                     entry_number=entry_number,
                     is_directory=is_dir,
                     file_name=file_name or "",
-                    full_path=full_path,
+                    full_path=full_path or ".",
                     size_bytes=size_bytes,
                     created_ts=created,
                     modified_ts=modified,
@@ -877,16 +901,10 @@ def ingest_amcache_csv_to_db(ev: Evidence, csv_path: Path, chunk=1000) -> int:
 
     return saved
 
-
 def ingest_evtx_csv_to_db(ev: Evidence, csv_path: Path, chunk=2000) -> int:
-    """
-    อ่าน evtx_all.csv (จาก EvtxECmd) → SecurityEvent
-    รองรับ Header ที่ต่างกันได้ด้วย normalizer; ค่าที่ไม่เข้าคอลัมน์หลักจะเก็บลง event_data (JSON)
-    """
     saved = 0
     batch: list[SecurityEvent] = []
 
-    # คีย์ header ที่ถือว่าเป็น "หลัก"
     core_keys = {
         "timestamp","timecreated","created",
         "eventid","provider","channel","computer","user","userid","recordnumber","recordid",
@@ -901,11 +919,29 @@ def ingest_evtx_csv_to_db(ev: Evidence, csv_path: Path, chunk=2000) -> int:
 
                 eid = _to_int(_pick(n, "EventID"))
                 if eid == 0:
-                    # ไม่มี EventID → ข้าม
                     continue
 
                 ts = _pick(n, "Timestamp","TimeCreated","Created")
                 dt = _parse_ts_guess(ts)
+
+                # --- แยกดิบที่เหลือเก็บลง event_data ---
+                ed = {k: v for k, v in raw.items()
+                      if v not in (None, "")
+                      and _norm_key(k) not in core_keys}
+
+                # message ดิบจาก CSV (ถ้ามี)
+                msg_raw = _pick(n, "Message")
+
+                # --- สร้าง description ตาม EventID (เก็บเพิ่ม ไม่ทับของดิบ) ---
+                desc, norm = describe_event(
+                    eid,
+                    {"event_id": eid, "message": msg_raw},
+                    ed
+                )
+                if msg_raw and desc != msg_raw:
+                    ed["MessageRaw"] = msg_raw  # เก็บของดิบไว้ด้วย
+                ed["__desc"] = desc           # เก็บคำอธิบายประกอบ
+                ed["__norm"] = norm           # เก็บ normalized fields เผื่อใช้ค้น/สรุปต่อ
 
                 event = SecurityEvent(
                     evidence   = ev,
@@ -923,10 +959,9 @@ def ingest_evtx_csv_to_db(ev: Evidence, csv_path: Path, chunk=2000) -> int:
                     user_name  = _pick(n, "User"),
                     process_id = _to_int(_pick(n, "ProcessID","PID")),
                     thread_id  = _to_int(_pick(n, "ThreadID","TID")),
-                    message    = _pick(n, "Message"),
-                    event_data = {k: v for k, v in raw.items()
-                                  if v not in (None, "")
-                                  and _norm_key(k) not in core_keys},
+                    # เก็บ message ให้ “อ่านรู้เรื่อง” ก่อน (ถ้าไม่มีจะว่างก็ได้ แต่เรามี desc แล้ว)
+                    message    = desc or msg_raw or "",
+                    event_data = ed,
                 )
                 batch.append(event)
 
@@ -1011,8 +1046,8 @@ def security_events_rows_api(request, ev_id: int):
         raise Http404("evidence not found")
 
     # --- รับพารามิเตอร์จาก query ---
-    q = (request.GET.get("q") or "").strip()
-    event_id = (request.GET.get("event_id") or "").strip()
+    q          = (request.GET.get("q") or "").strip()
+    event_id   = (request.GET.get("event_id") or "").strip()
     logon_type = (request.GET.get("logon_type") or "").strip()
 
     try:
@@ -1023,17 +1058,18 @@ def security_events_rows_api(request, ev_id: int):
     page = max(1, page)
     page_size = max(1, min(page_size, 1000))
 
-    sort = (request.GET.get("sort") or "Timestamp").strip()
+    sort  = (request.GET.get("sort") or "Timestamp").strip()
     order = (request.GET.get("order") or "desc").strip().lower()
 
-    # ✅ ใช้ชื่อฟิลด์ที่ "มีจริง" ในโมเดลเท่านั้น
-    # ถ้าต้องการ sort ตาม IP ให้สั่งไปที่ key ใน JSON: event_data__IpAddress
+    # ชื่อฟิลด์สำหรับ order_by (รองรับ SourceIP จาก __norm.src_ip ด้วย)
     sortmap = {
-        "Timestamp": "timestamp",
-        "EventID": "event_id",
-        "User": "user_name",
-        "Computer": "computer",
-        # "SourceIP": "event_data__IpAddress",  # เปิดใช้ถ้าอยาก sort ตาม IP ใน Postgres/JSONField
+        "Timestamp":   "timestamp",
+        "EventID":     "event_id",
+        "User":        "user_name",
+        "Computer":    "computer",
+        "Message":     "message",                 # UI เดิม
+        "Description": "message",                 # UI ใหม่
+        "SourceIP":    "event_data____norm__src_ip",
     }
     sort_field = sortmap.get(sort, "timestamp")
     if order == "desc":
@@ -1042,10 +1078,12 @@ def security_events_rows_api(request, ev_id: int):
     # --- base queryset ---
     qs = SecurityEvent.objects.filter(evidence=ev).order_by(sort_field)
 
-    # --- ค้นหาแบบกว้าง ---
+    # --- ค้นหาแบบกว้าง (มองทั้ง message, __desc, MessageRaw, user/computer/provider) ---
     if q:
         qs = qs.filter(
             Q(message__icontains=q) |
+            Q(event_data____desc__icontains=q) |
+            Q(event_data__MessageRaw__icontains=q) |
             Q(user_name__icontains=q) |
             Q(computer__icontains=q) |
             Q(provider__icontains=q)
@@ -1059,14 +1097,14 @@ def security_events_rows_api(request, ev_id: int):
         except ValueError:
             pass
 
-    # --- filter logon_type (ส่วนใหญ่ใช้กับ 4624/4625) ---
+    # --- filter logon_type (ดูทั้งคีย์ดิบและคีย์ normalize) ---
     if logon_type:
-        # ดึงจาก JSON key ที่พบบ่อย เช่น LogonType / Logon_Type
         qs = qs.filter(
             Q(event_id__in=[4624, 4625]) &
             (
                 Q(event_data__LogonType=logon_type) |
-                Q(event_data__Logon_Type=logon_type)
+                Q(event_data__Logon_Type=logon_type) |
+                Q(event_data____norm__logon_type=logon_type)
             )
         )
 
@@ -1075,33 +1113,65 @@ def security_events_rows_api(request, ev_id: int):
     end = start + page_size
 
     rows = []
-    # ✅ ดึงเฉพาะฟิลด์ที่มี + event_data (ไว้คาย IP)
-    for r in qs.values("timestamp", "event_id", "message", "user_name", "computer", "event_data")[start:end]:
+    # ดึงฟิลด์ที่ต้องใช้ + event_data (JSON)
+    fields = ("timestamp", "event_id", "message", "user_name", "computer", "event_data")
+    for r in qs.values(*fields)[start:end]:
         ts = r["timestamp"]
-        if isinstance(ts, datetime):
-            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            ts_str = str(ts) if ts is not None else ""
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, datetime) else (str(ts) if ts else "")
 
         ed = r.get("event_data") or {}
-        # ✅ เดา key IP จากหลายชื่อที่เจอบ่อย
+        norm = (ed.get("__norm") or {}) if isinstance(ed, dict) else {}
+
+        # Source IP: ใช้ของ normalize ก่อน แล้วค่อย fallback
         src_ip = (
-            ed.get("IpAddress")
-            or ed.get("Ip")
-            or ed.get("SourceIp")
-            or ed.get("SourceIPAddress")
-            or ed.get("SourceNetworkAddress")
-            or ed.get("ClientAddress")
-            or ""
+            norm.get("src_ip") or
+            ed.get("IpAddress") or ed.get("Ip") or ed.get("SourceIp") or
+            ed.get("SourceIPAddress") or ed.get("SourceNetworkAddress") or
+            ed.get("ClientAddress") or ed.get("RemoteHost") or ""
         )
+
+        # Description: ใช้ message ที่เราประกอบตอน ingest ก่อน > __desc > MapDescription > Payload
+        desc = (
+            r.get("message") or
+            ed.get("__desc") or
+            ed.get("MapDescription") or
+            ed.get("Payload") or
+            ""
+        )
+
+        # ผู้ใช้: ใช้ค่าที่ normalize ก่อน แล้วค่อย fallback ไปยังคีย์ดิบ
+        user = (norm.get("actor") or r.get("user_name") or
+                ed.get("TargetUserName") or ed.get("SubjectUserName") or
+                ed.get("AccountName") or "")
+        domain = (norm.get("domain") or
+                  ed.get("TargetDomainName") or ed.get("SubjectDomainName") or ed.get("DomainName") or "")
+        user_display = f"{domain}\\{user}" if domain and user else (user or "")
+
+        # รายละเอียดที่ forensic ใช้บ่อย (โชว์ในแถวขยาย)
+        details = {
+            "LogonType":         norm.get("logon_type") or ed.get("LogonType") or ed.get("Logon_Type"),
+            "WorkstationName":   ed.get("WorkstationName") or ed.get("Workstation"),
+            "ProcessName":       norm.get("process") or ed.get("ProcessName") or ed.get("NewProcessName") or ed.get("Image"),
+            "CommandLine":       ed.get("CommandLine") or ed.get("ProcessCommandLine") or ed.get("CmdLine"),
+            "FailureReason":     norm.get("failure_reason") or ed.get("FailureReason") or ed.get("Status") or ed.get("SubStatus"),
+            "AuthPackage":       norm.get("auth_package") or ed.get("AuthenticationPackageName") or ed.get("PackageName"),
+            "TargetUserName":    ed.get("TargetUserName"),
+            "TargetDomainName":  ed.get("TargetDomainName"),
+            "SubjectUserName":   ed.get("SubjectUserName"),
+            "SubjectDomainName": ed.get("SubjectDomainName"),
+            "ServiceName":       ed.get("ServiceName"),
+            "ObjectName":        ed.get("ObjectName"),
+        }
 
         rows.append({
             "Timestamp": ts_str,
             "EventID": r.get("event_id") or "",
-            "User": r.get("user_name") or "",
-            "Computer": r.get("computer") or "",
+            "Description": desc,
+            "User": user_display,
             "SourceIP": src_ip or "",
-            "Message": r.get("message") or "",
+            "Computer": r.get("computer") or "",
+            "Details": details,     # สำหรับ UI แสดงเพิ่มเติม (แถวขยาย)
+            "Raw": ed,              # JSON ดิบ เผื่อเปิดดู/คัดลอก
         })
 
     return JsonResponse({
@@ -1118,3 +1188,96 @@ def security_events_summary_api(request, ev_id: int):
     ev = get_object_or_404(Evidence, id=ev_id)
     total = SecurityEvent.objects.filter(evidence=ev).count()
     return JsonResponse({"ok": True, "total": total})
+
+@require_GET
+def dashboard_overview_api(request):
+    """
+    สรุปตัวเลขและรายการเคสล่าสุดสำหรับหน้า Dashboard
+    - totals: cases, evidence, active_cases, completed_cases
+    - recent_cases: id, case_number, title, evidence_count, investigator, status, created_at
+    """
+    # --- ตัวเลขรวม ---
+    total_cases = Case.objects.count()
+    total_evidence = Evidence.objects.count()
+
+    # เคสที่ยังมี evidence กำลังประมวลผลอยู่ (PENDING/RUNNING)
+    active_case_ids = set(
+        Evidence.objects
+        .filter(parse_status__in=[
+            getattr(Evidence.ParseStatus, "PENDING", "PENDING"),
+            getattr(Evidence.ParseStatus, "RUNNING", "RUNNING"),
+        ])
+        .values_list("case_id", flat=True)
+        .distinct()
+    )
+
+    # เคสที่ evidence ทั้งหมดเป็น DONE (และต้องมี evidence อย่างน้อย 1)
+    agg = (
+        Evidence.objects
+        .values("case_id")
+        .annotate(
+            total=Count("id"),
+            done=Count("id", filter=Q(parse_status=getattr(Evidence.ParseStatus, "DONE", "DONE"))),
+        )
+        .filter(total__gt=0)
+        .filter(done=F("total"))
+    )
+    completed_case_ids = set([row["case_id"] for row in agg])
+
+    # --- Recent cases (8 อันดับล่าสุด) + นับ evidence ---
+    recent_qs = (
+        Case.objects
+        .annotate(evidence_count=Count("evidence"))
+        .order_by("-id")[:8]   # ใช้ -id เป็นค่า default ที่เสถียร
+    )
+
+    recent_cases = []
+    for c in recent_qs:
+        # เดา investigator: ดึง uploaded_by ของ evidence ล่าสุด (ถ้ามี)
+        last_ev = (
+            Evidence.objects
+            .filter(case=c)
+            .select_related("uploaded_by")
+            .order_by("-id")
+            .first()
+        )
+        if last_ev and getattr(last_ev, "uploaded_by", None):
+            inv = getattr(last_ev.uploaded_by, "username", "") or str(last_ev.uploaded_by)
+        else:
+            inv = ""
+
+        if c.id in active_case_ids:
+            status = "Active"
+            status_badge = "warning"
+        elif c.id in completed_case_ids:
+            status = "Completed"
+            status_badge = "success"
+        else:
+            status = "Idle"
+            status_badge = "secondary"
+
+        created_str = ""
+        if hasattr(c, "created_at") and c.created_at:
+            created_str = c.created_at.strftime("%Y-%m-%d %H:%M:%S")
+
+        recent_cases.append({
+            "id": c.id,
+            "case_number": getattr(c, "case_number", f"CASE-{c.id}"),
+            "title": getattr(c, "title", "") or "",
+            "evidence_count": c.evidence_count or 0,
+            "investigator": inv,
+            "status": status,
+            "status_badge": status_badge,  # ใช้บน UI
+            "created_at": created_str,
+        })
+
+    payload = {
+        "totals": {
+            "cases": total_cases,
+            "evidence": total_evidence,
+            "active_cases": len(active_case_ids),
+            "completed_cases": len(completed_case_ids),
+        },
+        "recent_cases": recent_cases,
+    }
+    return JsonResponse(payload)

@@ -94,18 +94,85 @@
     const tbody = document.getElementById('securityTableBody');
     if (!tbody) return;
     tbody.innerHTML = '';
-    for (const r of rows) {
+
+    const ell = (s, n) => {
+      s = String(s || '');
+      return s.length > n ? s.slice(0, n - 1) + '…' : s;
+    };
+
+    rows.forEach((r, idx) => {
+      // แถวหลัก
       const tr = document.createElement('tr');
+      tr.className = 'sec-row';
+      tr.setAttribute('data-row', idx);
+
+      const shortDesc = ell(r.Description || r.Message || '', 120);
+      const fullDesc = (r.Description || r.Message || '').replaceAll('"','&quot;');
+
       tr.innerHTML = `
         <td>${r.Timestamp ?? ''}</td>
         <td>${r.EventID ?? ''}</td>
-        <td>${r.Message ?? ''}</td>
+        <td title="${fullDesc}">${shortDesc}</td>
         <td>${r.User ?? ''}</td>
         <td>${r.SourceIP ?? ''}</td>
         <td>${r.Computer ?? ''}</td>
       `;
+
+      // แถวรายละเอียด (ซ่อน)
+      const trd = document.createElement('tr');
+      trd.className = 'sec-row-detail';
+      trd.style.display = 'none';
+
+      const details = r.Details || {};
+      const kv = Object.entries(details)
+        .filter(([_,v]) => v !== undefined && v !== null && String(v) !== '')
+        .map(([k,v]) => `<div><strong>${k}:</strong> <span>${String(v)}</span></div>`)
+        .join('');
+
+      const rawJson = (() => {
+        try { return JSON.stringify(r.Raw || {}, null, 2); } catch { return '{}'; }
+      })();
+
+      trd.innerHTML = `
+        <td colspan="6" style="background:#fafafa">
+          <div style="display:flex; gap:24px; align-items:flex-start">
+            <div style="min-width:320px">
+              <div style="font-weight:600; margin-bottom:6px">Details</div>
+              ${kv || '<div style="opacity:.7">No extra fields</div>'}
+            </div>
+            <div style="flex:1">
+              <div style="font-weight:600; margin-bottom:6px">Full Description</div>
+              <pre style="white-space:pre-wrap; margin:0">${(r.Description || r.Message || '').trim() || '(empty)'}</pre>
+            </div>
+            <div style="min-width:320px">
+              <div style="display:flex; justify-content:space-between; align-items:center">
+                <div style="font-weight:600">Raw EventData</div>
+                <button class="btn btn-sm btn-outline-secondary" data-copy-raw>Copy</button>
+              </div>
+              <pre style="max-height:240px; overflow:auto; margin-top:6px" data-raw>${rawJson}</pre>
+            </div>
+          </div>
+        </td>
+      `;
+
+      // toggle expand/collapse
+      tr.addEventListener('click', () => {
+        trd.style.display = (trd.style.display === 'none') ? '' : 'none';
+      });
+
+      // copy raw
+      trd.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-copy-raw]');
+        if (!btn) return;
+        const pre = trd.querySelector('[data-raw]');
+        navigator.clipboard.writeText(pre.textContent || '{}');
+        btn.textContent = 'Copied';
+        setTimeout(()=> btn.textContent = 'Copy', 1200);
+      });
+
       tbody.appendChild(tr);
-    }
+      tbody.appendChild(trd);
+    });
   }
 
   // ===== State =====
